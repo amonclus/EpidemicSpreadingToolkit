@@ -12,6 +12,7 @@ pattern used in the standalone app2.py.
 """
 from __future__ import annotations
 
+import sys
 import warnings
 from pathlib import Path
 
@@ -25,6 +26,25 @@ warnings.filterwarnings("ignore")
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # src/ui/tabs/ → src/ui/ → src/
 _SRC_DIR = Path(__file__).parent.parent.parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+try:
+    from analysis.graph_features import extract_graph_features, GRAPH_FEATURE_NAMES
+    _HAS_GRAPH_FEATURES = True
+except ImportError:
+    _HAS_GRAPH_FEATURES = False
+    GRAPH_FEATURE_NAMES = []
+
+try:
+    from input.graph_generator import (
+        generate_er_graph,
+        generate_lattice_graph,
+        generate_random_geometric_graph,
+    )
+    _HAS_GRAPH_GEN = True
+except ImportError:
+    _HAS_GRAPH_GEN = False
 
 
 def _find_ml_data() -> Path:
@@ -32,7 +52,7 @@ def _find_ml_data() -> Path:
         _SRC_DIR / "ml_data",
         _SRC_DIR.parent / "ml_data",
     ]:
-        if candidate.exists() and (candidate / "rf_regressor.pkl").exists():
+        if candidate.exists() and (candidate / "dl_regressor.pkl").exists():
             return candidate
     return _SRC_DIR / "ml_data"   # fallback — triggers demo mode
 
@@ -42,24 +62,27 @@ ML_DATA = _find_ml_data()
 # ── CSS (injected once per session) ──────────────────────────────────────────
 _CSS = """
 <style>
-.verdict-viral    { background: linear-gradient(135deg,#FF1744,#B71C1C);
-                    color:white; border-radius:12px; padding:22px;
-                    text-align:center; margin:8px 0; }
-.verdict-strong   { background: linear-gradient(135deg,#FF6D00,#E65100);
-                    color:white; border-radius:12px; padding:22px;
-                    text-align:center; margin:8px 0; }
-.verdict-moderate { background: linear-gradient(135deg,#F9A825,#F57F17);
-                    color:#111;  border-radius:12px; padding:22px;
-                    text-align:center; margin:8px 0; }
-.verdict-niche    { background: linear-gradient(135deg,#1565C0,#0D47A1);
-                    color:white; border-radius:12px; padding:22px;
-                    text-align:center; margin:8px 0; }
-.ml-model-card    { border:1px solid rgba(255,255,255,0.18);
-                    border-radius:10px; padding:18px; margin:8px 0; }
-.demo-banner      { background:#E65100; color:white; border-radius:8px;
-                    padding:12px 18px; margin-bottom:14px; font-weight:600; }
+.verdict-viral    { border-left:4px solid #EF5350; border-radius:6px;
+                    padding:16px 20px; margin:8px 0;
+                    background:rgba(239,83,80,0.07); }
+.verdict-strong   { border-left:4px solid #FFA726; border-radius:6px;
+                    padding:16px 20px; margin:8px 0;
+                    background:rgba(255,167,38,0.07); }
+.verdict-moderate { border-left:4px solid #FFCA28; border-radius:6px;
+                    padding:16px 20px; margin:8px 0;
+                    background:rgba(255,202,40,0.07); }
+.verdict-niche    { border-left:4px solid #42A5F5; border-radius:6px;
+                    padding:16px 20px; margin:8px 0;
+                    background:rgba(66,165,245,0.07); }
+.ml-model-card    { border:1px solid rgba(255,255,255,0.12);
+                    border-radius:8px; padding:18px; margin:8px 0; }
+.ml-ci-card       { border:1px solid rgba(255,255,255,0.12);
+                    border-radius:8px; padding:16px 20px; margin:8px 0; }
+.demo-banner      { border-left:4px solid #FFA726; border-radius:6px;
+                    padding:10px 16px; margin-bottom:14px;
+                    background:rgba(255,167,38,0.1); font-weight:600; }
 .ml-section-card  { border:1px solid rgba(255,255,255,0.12);
-                    border-radius:10px; padding:18px; margin:8px 0;
+                    border-radius:8px; padding:18px; margin:8px 0;
                     text-align:center; }
 </style>
 """
@@ -146,6 +169,24 @@ MODEL_INFO: dict[str, dict] = {
         "best_for": "Behaviour change campaigns, lifestyle shifts",
         "curve_k": 0.40, "curve_t0": 0.42,
     },
+    "BP-SIR hybrid": {
+        "icon": "⚡", "label": "BP/SIR Hybrid",
+        "desc": ("A mix of individual word-of-mouth and peer-pressure dynamics. "
+                 "Spread can be ignited by a single exposure but accelerates once "
+                 "social reinforcement kicks in."),
+        "type": "Hybrid (BP + SIR)",
+        "best_for": "Product launches, brand campaigns, slow-burn news stories",
+        "curve_k": 0.35, "curve_t0": 0.35,
+    },
+    "SIS-WTM hybrid": {
+        "icon": "🔥", "label": "SIS/WTM Hybrid",
+        "desc": ("A recurring-engagement mechanism reinforced by social thresholds. "
+                 "Content stays alive long-term as repeated peer exposure pushes "
+                 "more people past their adoption threshold."),
+        "type": "Hybrid (SIS + WTM)",
+        "best_for": "Ongoing social issues, grassroots movements, community content",
+        "curve_k": 0.30, "curve_t0": 0.40,
+    },
 }
 
 CONTENT_TO_MODEL_HINTS: dict[str, tuple[str, str]] = {
@@ -166,6 +207,14 @@ TIPPING_THRESHOLDS: dict[str, float] = {
     "SIR": 0.05, "SIS": 0.05, "BP": 0.15, "WTM": 0.12,
     "H1":  0.08, "H2": 0.12, "H3": 0.06, "H4": 0.08,
     "H5":  0.15, "H6": 0.10,
+    "BP-SIR hybrid": 0.09, "SIS-WTM hybrid": 0.11,
+}
+
+# H1/H2/H3 are BP-SIR hybrids; H4/H5/H6 are SIS-WTM hybrids.
+# The DL model still predicts the original 10 classes; we remap for display only.
+_DISPLAY_NAME: dict[str, str] = {
+    "H1": "BP-SIR hybrid", "H2": "BP-SIR hybrid", "H3": "BP-SIR hybrid",
+    "H4": "SIS-WTM hybrid", "H5": "SIS-WTM hybrid", "H6": "SIS-WTM hybrid",
 }
 
 DEFAULT_FEATURE_NAMES = [
@@ -185,21 +234,24 @@ _PLOTLY = dict(
 _M = dict(l=50, r=20, t=30, b=50)
 
 
-# ── ML model loading ──────────────────────────────────────────────────────────
+# ── Model loading ─────────────────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner="Loading ML models…")
+@st.cache_resource(show_spinner="Loading models…")
 def _load_models():
-    """Returns (reg, clf, label_encoder, feature_names, demo_mode)."""
+    """Returns (reg, clf, label_encoder, feature_names, demo_mode, graph_feat_means)."""
     try:
         import joblib
-        reg    = joblib.load(ML_DATA / "rf_regressor.pkl")
-        clf    = joblib.load(ML_DATA / "rf_classifier.pkl")
-        le     = joblib.load(ML_DATA / "label_encoder.pkl")
-        fnames = joblib.load(ML_DATA / "feature_names.pkl")
-        return reg, clf, le, fnames, False
+        reg = joblib.load(ML_DATA / "dl_regressor.pkl")
+        clf = joblib.load(ML_DATA / "dl_classifier.pkl")
+        le  = joblib.load(ML_DATA / "label_encoder.pkl")
+        try:
+            gfm = joblib.load(ML_DATA / "graph_feature_means.pkl")
+        except Exception:
+            gfm = {}
+        return reg, clf, le, None, False, gfm
     except Exception:
         le = {i: name for i, name in enumerate(MODEL_INFO)}
-        return None, None, le, DEFAULT_FEATURE_NAMES, True
+        return None, None, le, None, True, {}
 
 
 # ── Feature extraction ────────────────────────────────────────────────────────
@@ -342,59 +394,91 @@ def _demo_predict(series: np.ndarray, content_type: str,
 # ── Prediction pipeline ───────────────────────────────────────────────────────
 
 def _run_prediction(series_pct: list[float], content_type: str,
-                    network_type: str, horizon: int) -> dict:
-    reg, clf, label_encoder, feature_names, demo_mode = _load_models()
+                    network_type: str, horizon: int,
+                    graph=None) -> dict:
+    reg, clf, label_encoder, _, demo_mode, graph_feat_means = _load_models()
 
-    series   = np.clip(np.array(series_pct, dtype=float) / 100.0, 0.0, 1.0)
-    net_mult = NETWORK_MULTIPLIER.get(network_type, 1.0)
+    series = np.clip(np.array(series_pct, dtype=float) / 100.0, 0.0, 1.0)
+    graph_conditioned = False
 
     if demo_mode:
-        rho_final, rho_std, model_name, confidence = _demo_predict(
+        rho_final, rho_std, raw_model_name, confidence = _demo_predict(
             series, content_type, network_type
         )
     else:
-        feats     = _extract_features(series)
-        X         = _build_feature_row(feats, feature_names)
-        rho_raw   = float(reg.predict(X)[0])
-        rho_final = float(np.clip(rho_raw * net_mult, 0.0, 1.0))
+        I_matrix = series.reshape(1, -1).astype(np.float32)
 
-        if hasattr(reg, "estimators_"):
-            tree_preds = np.array([e.predict(X)[0] for e in reg.estimators_])
-            rho_std    = float(tree_preds.std())
+        # Build graph feature row (1, n_graph_feats) when available
+        graph_features = None
+        if graph is not None and _HAS_GRAPH_FEATURES:
+            try:
+                gf_dict = extract_graph_features(graph)
+                graph_features = np.array(
+                    [[gf_dict.get(k, 0.0) for k in GRAPH_FEATURE_NAMES]],
+                    dtype=np.float32,
+                )
+                graph_conditioned = True
+            except Exception:
+                pass
+        if graph_features is None and graph_feat_means:
+            graph_features = np.array(
+                [[graph_feat_means.get(k, 0.0) for k in GRAPH_FEATURE_NAMES]],
+                dtype=np.float32,
+            )
+
+        rho_raw = float(reg.predict(I_matrix, graph_features)[0])
+
+        if graph_conditioned:
+            rho_final = float(np.clip(rho_raw, 0.0, 1.0))
         else:
-            rho_std = 0.08 * rho_final + 0.02
+            net_mult  = NETWORK_MULTIPLIER.get(network_type, 1.0)
+            rho_final = float(np.clip(rho_raw * net_mult, 0.0, 1.0))
 
-        proba      = clf.predict_proba(X)[0]
-        model_id   = int(clf.predict(X)[0])
-        model_name = label_encoder[model_id]
-        confidence = float(proba.max())
+        rho_std = 0.08 * rho_final + 0.02
+
+        proba         = clf.predict_proba(I_matrix, graph_features)[0]
+        model_id      = int(clf.predict(I_matrix, graph_features)[0])
+        raw_model_name = label_encoder[model_id]
+        # Confidence: sum probs of all constituent models when remapped to a family
+        display_name = _DISPLAY_NAME.get(raw_model_name, raw_model_name)
+        if raw_model_name != display_name:
+            family_ids = [i for i, n in label_encoder.items()
+                          if _DISPLAY_NAME.get(n, n) == display_name]
+            confidence = float(sum(proba[i] for i in family_ids if i < len(proba)))
+        else:
+            confidence = float(proba[model_id])
+
+    # Use specific model name for trajectory shape, remapped name for display
+    traj_model = raw_model_name
+    model_name = _DISPLAY_NAME.get(raw_model_name, raw_model_name)
 
     n_obs = len(series)
-    traj  = _generate_trajectory(model_name, rho_final, n_obs, horizon, float(series[-1]))
+    traj  = _generate_trajectory(traj_model, rho_final, n_obs, horizon, float(series[-1]))
 
     return {
-        "rho_final":    rho_final,
-        "rho_std":      rho_std,
-        "model_name":   model_name,
-        "confidence":   confidence,
-        "series_pct":   list(series_pct),
-        "traj_pct":     (traj * 100).tolist(),
-        "t_full":       list(range(n_obs + horizon)),
-        "n_obs":        n_obs,
-        "demo_mode":    demo_mode,
-        "content_type": content_type,
-        "network_type": network_type,
+        "rho_final":         rho_final,
+        "rho_std":           rho_std,
+        "model_name":        model_name,
+        "confidence":        confidence,
+        "series_pct":        list(series_pct),
+        "traj_pct":          (traj * 100).tolist(),
+        "t_full":            list(range(n_obs + horizon)),
+        "n_obs":             n_obs,
+        "demo_mode":         demo_mode,
+        "content_type":      content_type,
+        "network_type":      network_type,
+        "graph_conditioned": graph_conditioned,
     }
 
 
-def _get_verdict(rho: float) -> tuple[str, str, str, str]:
+def _get_verdict(rho: float) -> tuple[str, str, str]:
     if rho >= 0.60:
-        return "🔴", "VIRAL",          "verdict-viral",    "This content is going viral. Explosive spread detected."
+        return "High spread",     "verdict-viral",    "Predicted to reach a large fraction of the network."
     if rho >= 0.30:
-        return "🟠", "Strong Spread",  "verdict-strong",   "This content has strong viral potential and will reach a large portion of your network."
+        return "Moderate spread", "verdict-strong",   "Predicted to reach a substantial portion of the network."
     if rho >= 0.10:
-        return "🟡", "Moderate Spread","verdict-moderate", "This content will reach a meaningful audience but won't go fully viral."
-    return     "🔵", "Niche Content",  "verdict-niche",    "This content is likely to stay within a small community."
+        return "Limited spread",  "verdict-moderate", "Predicted to reach a meaningful but minority audience."
+    return     "Local spread",    "verdict-niche",    "Predicted to remain within a small fraction of the network."
 
 
 # ── CSV upload helper ─────────────────────────────────────────────────────────
@@ -451,6 +535,9 @@ def render_ml_virality_tab() -> None:
     """Renders the 'Will It Go Viral?' predictor tab, including sidebar inputs."""
     st.markdown(_CSS, unsafe_allow_html=True)
 
+    # pick up graph loaded elsewhere in the app (may be None)
+    session_graph = st.session_state.get("graph", None)
+
     # ── Sidebar inputs ─────────────────────────────────────────────────────
     with st.sidebar:
         st.header("About your content")
@@ -461,10 +548,53 @@ def render_ml_virality_tab() -> None:
             options=list(CONTENT_TO_MODEL_HINTS.keys()),
         )
 
-        network_type = st.selectbox(
-            "What kind of social network?",
-            options=list(NETWORK_MULTIPLIER.keys()),
-        )
+        if session_graph is not None and _HAS_GRAPH_FEATURES:
+            n  = session_graph.number_of_nodes()
+            m  = session_graph.number_of_edges()
+            st.success(
+                f"Using loaded graph ({n:,} nodes, {m:,} edges).\n\n"
+                "Graph structure will condition the prediction."
+            )
+            network_type = None
+        else:
+            network_type = st.selectbox(
+                "What kind of social network?",
+                options=list(NETWORK_MULTIPLIER.keys()),
+            )
+
+        if _HAS_GRAPH_GEN:
+            with st.expander("🔄 Change graph"):
+                graph_type = st.selectbox(
+                    "Graph type",
+                    ["Erdős–Rényi", "Random Geometric", "Lattice"],
+                    key="ml_graph_type",
+                )
+                if graph_type == "Erdős–Rényi":
+                    col1, col2 = st.columns(2)
+                    _n = col1.number_input("Nodes", 10, 5000, 200, key="ml_er_n")
+                    _p = col2.slider("Edge prob (p)", 0.01, 1.0, 0.10, 0.01, key="ml_er_p")
+                    if st.button("Generate", key="ml_gen_er", use_container_width=True):
+                        with st.spinner("Generating…"):
+                            st.session_state["graph"] = generate_er_graph(int(_n), float(_p))
+                        st.rerun()
+                elif graph_type == "Random Geometric":
+                    col1, col2 = st.columns(2)
+                    _n = col1.number_input("Nodes", 10, 5000, 200, key="ml_rgg_n")
+                    _r = col2.slider("Radius (r)", 0.01, 1.0, 0.20, 0.01, key="ml_rgg_r")
+                    if st.button("Generate", key="ml_gen_rgg", use_container_width=True):
+                        with st.spinner("Generating…"):
+                            st.session_state["graph"] = generate_random_geometric_graph(int(_n), float(_r))
+                        st.rerun()
+                else:
+                    _g = st.number_input("Grid side", 3, 100, 10, key="ml_lat_g")
+                    if st.button("Generate", key="ml_gen_lat", use_container_width=True):
+                        with st.spinner("Generating…"):
+                            st.session_state["graph"] = generate_lattice_graph(int(_g))
+                        st.rerun()
+                if session_graph is not None:
+                    if st.button("Clear graph", key="ml_clear_graph", use_container_width=True):
+                        st.session_state["graph"] = None
+                        st.rerun()
 
         st.markdown("---")
         st.subheader("How has it spread so far?")
@@ -524,34 +654,34 @@ def render_ml_virality_tab() -> None:
 
     # ── Main area (idle state) ──────────────────────────────────────────────
     if not predict_btn:
-        st.markdown("## Virality Predictor")
+        st.markdown("## Contagion predictor")
         st.markdown(
-            "#### Predict how far a spreading process will reach — before it happens.\n\n"
+            "#### Predict the spread of a contagion.\n\n"
             "Enter your data in the **sidebar**, then click **Predict Virality**."
         )
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
             st.markdown(
-                '<div class="ml-section-card"><h3>📈 Reach Prediction</h3>'
+                '<div class="ml-section-card"><h3>Reach Prediction</h3>'
                 '<p>Predict the final % of the network reached.</p></div>',
                 unsafe_allow_html=True,
             )
         with col_b:
             st.markdown(
-                '<div class="ml-section-card"><h3>🧬 Mechanism ID</h3>'
-                '<p>Identify whether it spreads like news, a trend, or a social movement.</p></div>',
+                '<div class="ml-section-card"><h3>Mechanism ID</h3>'
+                '<p>Identify the spreading model from the early curve shape.</p></div>',
                 unsafe_allow_html=True,
             )
         with col_c:
             st.markdown(
-                '<div class="ml-section-card"><h3>🎯 Tipping Point</h3>'
+                '<div class="ml-section-card"><h3>Tipping Point</h3>'
                 '<p>Know whether the viral threshold has already been crossed.</p></div>',
                 unsafe_allow_html=True,
             )
 
         if series_pct:
-            st.markdown("#### Your early spread data (preview)")
+            st.markdown("#### Your early spread data")
             fig_prev = go.Figure(go.Scatter(
                 x=list(range(1, len(series_pct) + 1)), y=series_pct,
                 mode="lines+markers",
@@ -568,13 +698,26 @@ def render_ml_virality_tab() -> None:
 
     # ── Run prediction ──────────────────────────────────────────────────────
     with st.spinner("Analysing spread pattern…"):
-        res = _run_prediction(series_pct, content_type, network_type, horizon)
+        res = _run_prediction(
+            series_pct,
+            content_type,
+            network_type or "",
+            horizon,
+            graph=session_graph,
+        )
 
     if res["demo_mode"]:
         st.markdown(
-            '<div class="demo-banner">⚠️ Running in demo mode — ML model files not found. '
+            '<div class="demo-banner">Demo mode — ML model files not found. '
             'Predictions are illustrative only.</div>',
             unsafe_allow_html=True,
+        )
+
+    if res.get("graph_conditioned"):
+        st.info(
+            "Graph-conditioned prediction — the network structure of your loaded graph "
+            "is incorporated directly into the forecast.",
+            icon="🔬",
         )
 
     rho         = res["rho_final"]
@@ -586,7 +729,7 @@ def render_ml_virality_tab() -> None:
     conf        = res["confidence"]
     lo_pct      = max(0.0,   rho_pct - 1.5 * rho_std_pct)
     hi_pct      = min(100.0, rho_pct + 1.5 * rho_std_pct)
-    emoji, v_label, v_css, v_desc = _get_verdict(rho)
+    v_label, v_css, v_desc = _get_verdict(rho)
 
     st.markdown("---")
 
@@ -595,41 +738,57 @@ def render_ml_virality_tab() -> None:
     with col_v:
         st.markdown(
             f'<div class="{v_css}">'
-            f'<h1 style="margin:0">{emoji} {v_label}</h1>'
-            f'<p style="margin:8px 0">{v_desc}</p>'
-            f'<h2 style="margin:0">Predicted reach: {rho_pct:.1f}%</h2>'
+            f'<p style="margin:0 0 4px 0;font-size:0.8rem;text-transform:uppercase;'
+            f'letter-spacing:0.08em;opacity:0.7">Spread assessment</p>'
+            f'<h2 style="margin:0 0 6px 0">{v_label}</h2>'
+            f'<p style="margin:0;font-size:0.9rem">{v_desc}</p>'
             f'</div>',
             unsafe_allow_html=True,
         )
+        st.metric("Predicted final reach", f"{rho_pct:.1f}%")
         st.progress(float(np.clip(rho, 0, 1)))
-        st.caption(f"Expected range: **{lo_pct:.1f}%** — **{hi_pct:.1f}%**")
-        st.metric("Predicted final reach", f"{rho_pct:.1f}%",
-                  delta=f"±{rho_std_pct:.1f}% uncertainty")
+        st.markdown(
+            f'<div class="ml-ci-card">'
+            f'<p style="margin:0 0 6px 0;font-size:0.8rem;text-transform:uppercase;'
+            f'letter-spacing:0.08em;opacity:0.7">90% confidence interval</p>'
+            f'<h3 style="margin:0">{lo_pct:.1f}% &ndash; {hi_pct:.1f}%</h3>'
+            f'<p style="margin:6px 0 0 0;font-size:0.85rem;opacity:0.7">'
+            f'±{rho_std_pct:.1f} pp standard deviation</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     with col_m:
         st.markdown(
             f'<div class="ml-model-card">'
-            f'<h3 style="margin:0 0 6px 0">{minfo["icon"]} Spreading Mechanism Identified</h3>'
-            f'<h2 style="margin:0 0 8px 0">{minfo["label"]}</h2>'
-            f'<p style="margin:0">{minfo["desc"]}</p>'
+            f'<p style="margin:0 0 4px 0;font-size:0.8rem;text-transform:uppercase;'
+            f'letter-spacing:0.08em;opacity:0.7">Identified spreading model</p>'
+            f'<h2 style="margin:0 0 4px 0">{model_name}</h2>'
+            f'<p style="margin:0 0 10px 0;font-size:0.85rem;opacity:0.7">{minfo["type"]}</p>'
+            f'<p style="margin:0;font-size:0.9rem">{minfo["desc"]}</p>'
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.markdown(f"**Confidence in this diagnosis:** {conf * 100:.0f}%")
+        st.markdown(
+            f'<div class="ml-ci-card">'
+            f'<p style="margin:0 0 6px 0;font-size:0.8rem;text-transform:uppercase;'
+            f'letter-spacing:0.08em;opacity:0.7">Classifier confidence</p>'
+            f'<h3 style="margin:0">{conf * 100:.0f}%</h3>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         st.progress(float(conf))
 
-        with st.expander("Technical details"):
+        with st.expander("Details"):
             st.markdown(
-                f"**Model ID:** `{model_name}`  \n"
-                f"**Mechanism class:** {minfo['type']}  \n"
-                f"**Typical content:** {minfo['best_for']}  \n\n"
-                "The classifier identified this model from the shape of the early spread "
-                "curve using 22 time-series features extracted from the first "
-                f"{res['n_obs']} observations."
+                f"**Observation window:** {res['n_obs']} steps  \n"
+                f"**Typical content:** {minfo['best_for']}  \n"
+                f"**Features used:** 22 time-series"
+                + (" + 10 graph-structural" if res.get("graph_conditioned") else "")
             )
 
     st.markdown("---")
-    st.markdown("### 📈 Predicted Trajectory")
+    st.markdown("### Predicted Trajectory")
 
     traj   = np.array(res["traj_pct"])
     t_full = np.array(res["t_full"])
@@ -678,7 +837,7 @@ def render_ml_virality_tab() -> None:
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### 🎯 Tipping Point Analysis")
+    st.markdown("### Tipping Point Analysis")
 
     tipping      = TIPPING_THRESHOLDS.get(model_name, 0.10)
     obs_arr      = np.array(res["series_pct"])
@@ -708,11 +867,13 @@ def render_ml_virality_tab() -> None:
 
     st.markdown("---")
     with st.expander("📋 Export Results"):
+        graph_line = ("Graph-conditioned: Yes" if res.get("graph_conditioned")
+                      else f"Network type        : {network_type or 'n/a'}")
         summary_txt = (
             f"Virality Prediction Report\n"
             f"{'=' * 40}\n"
             f"Content type        : {content_type}\n"
-            f"Network type        : {network_type}\n"
+            f"{graph_line}\n"
             f"Verdict             : {v_label}\n"
             f"Predicted reach     : {rho_pct:.1f}%  (range: {lo_pct:.1f}%–{hi_pct:.1f}%)\n"
             f"Spreading mechanism : {minfo['label']} ({model_name})\n"
@@ -754,7 +915,7 @@ def render_ml_education_tab() -> None:
         )
         st.markdown(
             "One contact is enough. You see it once and share it. "
-            "Like a funny video or breaking news — **no peer pressure needed**. "
+            "Like a funny video or breaking news, **no peer pressure needed**. "
             "Growth is exponential: doubles at a steady rate."
         )
         fig_s = go.Figure()
@@ -775,7 +936,7 @@ def render_ml_education_tab() -> None:
         )
         st.markdown(
             "You need to see **multiple friends** doing it before you join. "
-            "Like a fitness challenge or a political movement — "
+            "Like a fitness challenge or a political movement, "
             "**peer pressure is the engine**. "
             "Slow start, then explosive growth once the threshold is crossed."
         )
@@ -791,52 +952,12 @@ def render_ml_education_tab() -> None:
         st.plotly_chart(fig_c, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### Interactive Demo")
-    st.markdown(
-        "Move the slider to see how the **threshold** — the number of contacts "
-        "required to trigger adoption — changes the spread curve."
-    )
-
-    k_val = st.slider(
-        "How many contacts need to act before you do?",
-        min_value=1, max_value=5, value=1,
-        help="1 = news (one contact is enough)   |   5 = social movement (peer pressure required)",
-    )
-
-    t2 = np.linspace(0, 30, 300)
-    if k_val == 1:
-        curve  = 0.75 * (1.0 - np.exp(-0.18 * t2))
-        label  = "Simple contagion (k=1): one exposure is enough"
-        colour = "#42A5F5"
-    else:
-        t0_map = {2: 15, 3: 18, 4: 21, 5: 24}
-        k_map  = {2: 0.4, 3: 0.6, 4: 0.8, 5: 1.0}
-        curve  = 0.75 / (1.0 + np.exp(-k_map[k_val] * (t2 - t0_map[k_val])))
-        label  = f"Complex contagion (k={k_val}): {k_val} contacts required"
-        colour = "#EF5350"
-
-    fig_inter = go.Figure(go.Scatter(
-        x=t2, y=curve * 100, mode="lines",
-        line=dict(color=colour, width=3), name=label,
-    ))
-    fig_inter.update_layout(
-        xaxis_title="Time", yaxis_title="% of network reached",
-        height=400, margin=_M, **_PLOTLY,
-    )
-    st.plotly_chart(fig_inter, use_container_width=True)
-    st.caption(
-        "Notice how requiring more peer confirmation changes the shape "
-        "from smooth exponential growth to a flat-then-explosive S-curve — "
-        "and makes spread **harder to stop** once it reaches the tipping point."
-    )
-
-    st.markdown("---")
-    st.markdown("### Real-World Examples")
+    st.markdown("### Real-world examples")
 
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
-            '<div class="ml-section-card"><h2>📰</h2><h4>Breaking News</h4>'
+            '<div class="ml-section-card"><h2>📰</h2><h4>Breaking news</h4>'
             '<b>SIR-like spreading</b><br><br>'
             'Spreads immediately to anyone who sees it. One share is enough. '
             'Peaks fast and fades fast.'
@@ -845,7 +966,7 @@ def render_ml_education_tab() -> None:
         )
     with c2:
         st.markdown(
-            '<div class="ml-section-card"><h2>🪣</h2><h4>Ice Bucket Challenge</h4>'
+            '<div class="ml-section-card"><h2>🪣</h2><h4>Ice bucket challenge</h4>'
             '<b>Complex contagion</b><br><br>'
             'Required seeing multiple friends participate before you felt '
             'compelled to join. Slow start, then an explosive cascade.'
@@ -854,7 +975,7 @@ def render_ml_education_tab() -> None:
         )
     with c3:
         st.markdown(
-            '<div class="ml-section-card"><h2>💉</h2><h4>Vaccine Hesitancy</h4>'
+            '<div class="ml-section-card"><h2>💉</h2><h4>Vaccine hesitancy</h4>'
             '<b>Hybrid spreading</b><br><br>'
             'Spreads through both information exposure AND social reinforcement. '
             'Hard to reverse.'
@@ -902,40 +1023,42 @@ def render_ml_education_tab() -> None:
 def render_ml_about_tab() -> None:
     """Renders the 'About' tab with accuracy metrics and project credits."""
     st.markdown(_CSS, unsafe_allow_html=True)
-    st.markdown("## About the ML Predictor")
+    st.markdown("## About the Predictor")
 
     st.markdown("### What is this?")
     st.markdown(
-        "The virality predictor is the applied ML component of a **bachelor's thesis** "
+        "The virality predictor is the applied deep learning component of a **bachelor's thesis** "
         "on hybrid epidemic spreading models. "
-        "Ten spreading models were studied — from pure word-of-mouth (SIR) to "
-        "pure peer-pressure (Bootstrap Percolation) and six hybrid combinations. "
+        "Ten spreading models were studied, from pure probabilistic (SIR/SIS) to "
+        "pure reinforced (Bootstrap percolation/WTM) and six hybrid combinations. "
         "Simulations were run on three synthetic network types and two real-world "
         "networks (Facebook and GitHub social graphs), generating 50,000 labelled "
-        "time-series observations. A machine learning model was then trained to "
-        "identify which mechanism is active from the **early spread curve alone** "
+        "time-series observations. A deep learning model (CNN) was then trained to "
+        "identify which mechanism is active from the **early spread curve and graph structure alone** "
         "and to predict the **final reach**."
     )
 
     st.markdown("---")
-    st.markdown("### The Models")
+    st.markdown("### The models")
 
+    _base_models = ["SIR", "SIS", "BP", "WTM", "H1", "H2", "H3", "H4", "H5", "H6"]
     table_data = {
-        "Model": list(MODEL_INFO.keys()),
-        "Type":  [m["type"]      for m in MODEL_INFO.values()],
-        "Plain-English name": [m["label"]    for m in MODEL_INFO.values()],
-        "Best describes":     [m["best_for"] for m in MODEL_INFO.values()],
+        "Model": _base_models,
+        "Type":  [MODEL_INFO[m]["type"]      for m in _base_models],
+        "Plain-English name": [MODEL_INFO[m]["label"]    for m in _base_models],
+        "Best describes":     [MODEL_INFO[m]["best_for"] for m in _base_models],
+        "Displayed as":       [_DISPLAY_NAME.get(m, m)  for m in _base_models],
     }
     st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.markdown("### How Accurate Is the Prediction?")
+    st.markdown("### How accurate is the prediction?")
 
     mae_pct, cls_acc = _load_summary_metrics()
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Reach Prediction Error", f"±{mae_pct:.1f}%")
+        st.metric("Reach prediction error", f"±{mae_pct:.1f}%")
         st.markdown(
             f"On average, the predicted final reach is within "
             f"**{mae_pct:.1f} percentage points** of the true value, "
@@ -980,18 +1103,40 @@ def render_ml_about_tab() -> None:
         "| **Year** | 2025 |\n"
         "| **Models** | SIR, SIS, Bootstrap Percolation, WTM, H1–H6 |\n"
         "| **Networks** | ER, RGG, Lattice, Facebook (SNAP), GitHub (MUSAE) |\n"
-        "| **ML** | Random Forest, 22 time-series features, 50 000 simulations |\n"
-        "| **Stack** | Python · NetworkX · Streamlit · Plotly · scikit-learn |\n"
+        "| **Predictor** | CNN, 22 time-series + 10 graph features, 50 000 simulations |\n"
+        "| **Stack** | Python · NetworkX · Streamlit · Plotly · PyTorch · scikit-learn |\n"
     )
 
 
 def _load_summary_metrics() -> tuple[float, float]:
-    candidates = [
+    """Read MAE (pp) and accuracy (%) from the DL or ML summary file."""
+    dl_candidates = [
+        _SRC_DIR / "results" / "dl" / "summary.txt",
+        _SRC_DIR.parent / "results" / "dl" / "summary.txt",
+    ]
+    for p in dl_candidates:
+        if p.exists():
+            try:
+                df = pd.read_csv(p, sep=r"\s{2,}", engine="python")
+                df.columns = df.columns.str.strip()
+                # Prefer Ensemble at t_obs=30, fall back to CNN
+                for model in ("Ensemble", "CNN"):
+                    row = df[(df["Model"].str.strip() == model) &
+                             (df["t_obs"].astype(int) == 30)]
+                    if not row.empty:
+                        mae_val = row["MAE"].iloc[0]
+                        acc_val = row["Accuracy"].iloc[0]
+                        if str(mae_val) != "-" and str(acc_val) != "-":
+                            return float(mae_val) * 100, float(acc_val) * 100
+            except Exception:
+                pass
+
+    # Fall back to ML summary (different format)
+    ml_candidates = [
         _SRC_DIR / "results" / "ml" / "summary.txt",
-        _SRC_DIR / "experiments" / "results" / "ml" / "summary.txt",
         _SRC_DIR.parent / "results" / "ml" / "summary.txt",
     ]
-    for p in candidates:
+    for p in ml_candidates:
         if p.exists():
             txt = p.read_text()
             mae, acc = None, None

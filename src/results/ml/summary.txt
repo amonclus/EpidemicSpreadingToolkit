@@ -12,4 +12,10 @@ CLASSIFICATION SUMMARY:
   Most confused pair: SIR mistaken for H3 (37.6% of the time)
   Best generalising network:  GitHub  (accuracy=66.1%)
   Worst generalising network: Facebook  (accuracy=48.7%)
+
+GRAPH FEATURE ABLATION (t_obs=30):
+  Regression  — w/o graph: MAE=0.0337  R²=0.9561
+  Regression  — w/  graph: MAE=0.0239  R²=0.9736  (ΔMAE=+0.0098)
+  Classification — w/o graph: acc=0.7549  F1=0.7520
+  Classification — w/  graph: acc=0.9185  F1=0.9187  (Δacc=+0.1636)
 ============================================================

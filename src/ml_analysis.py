@@ -37,6 +37,8 @@ import joblib
 
 warnings.filterwarnings("ignore")
 
+from analysis.graph_features import GRAPH_FEATURE_NAMES
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 T_OBS_VALUES  = [10, 20, 30, 50, 75, 100]
 T_OBS_DEFAULT = 30
@@ -85,6 +87,8 @@ FEATURE_CATEGORIES = {
     "phase_switch_score":       "shape",
     "fwhm":                     "shape",
     "autocorr_lag1":            "variance",
+    # graph-structural features
+    **{f: "graph" for f in GRAPH_FEATURE_NAMES},
 }
 
 CATEGORY_COLORS = {
@@ -92,9 +96,10 @@ CATEGORY_COLORS = {
     "shape":    "#8E24AA",
     "level":    "#1E88E5",
     "variance": "#43A047",
+    "graph":    "#FF6F00",
 }
 
-DATA_DIR    = Path("ml_data")
+DATA_DIR    = Path("ml/ml_data")
 RESULTS_DIR = Path("results/ml")
 
 FS_TITLE  = 14
@@ -201,11 +206,21 @@ def extract_features(I_series: np.ndarray, t_obs: int) -> dict:
     }
 
 
-def build_feature_matrix(I_series_matrix: np.ndarray, t_obs: int):
-    """Apply extract_features to every row. Returns (X ndarray, feature_names list)."""
+def build_feature_matrix(
+    I_series_matrix: np.ndarray,
+    t_obs: int,
+    graph_features_df: pd.DataFrame | None = None,
+):
+    """Apply extract_features to every row, optionally appending graph features.
+
+    Returns (X ndarray, feature_names list).
+    """
     rows = [extract_features(I_series_matrix[i], t_obs)
             for i in range(len(I_series_matrix))]
     df_f = pd.DataFrame(rows)
+    if graph_features_df is not None:
+        df_g = graph_features_df.reset_index(drop=True)
+        df_f = pd.concat([df_f, df_g], axis=1)
     return df_f.values.astype(float), list(df_f.columns)
 
 
@@ -224,8 +239,14 @@ def load_data():
     n_dropped = int((~valid).sum())
     df    = df[valid].reset_index(drop=True)
     I_all = I_all[valid]
+
+    graph_feat_cols = [c for c in df.columns if c in set(GRAPH_FEATURE_NAMES)]
     print(f"Loaded {len(df):,} valid samples  ({n_dropped} failed runs dropped)")
-    return df, I_all
+    if graph_feat_cols:
+        print(f"  Graph features found: {', '.join(graph_feat_cols)}")
+    else:
+        print("  No graph features in dataset — running without graph conditioning")
+    return df, I_all, graph_feat_cols
 
 
 # ── Pipeline factories ─────────────────────────────────────────────────────────
@@ -285,7 +306,8 @@ def save_fig(fig, name: str):
 # PART 2 — REGRESSION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_regression(df: pd.DataFrame, I_all: np.ndarray):
+def run_regression(df: pd.DataFrame, I_all: np.ndarray,
+                   graph_df: pd.DataFrame | None = None):
     print("\n── PART 2: REGRESSION ──────────────────────────────")
 
     y_reg = df["rho_final"].values
@@ -297,7 +319,9 @@ def run_regression(df: pd.DataFrame, I_all: np.ndarray):
     def_y_te       = None
     def_y_pred     = None
     def_idx_te     = None
+    def_idx_tr     = None
     def_feat_names = None
+    ablation_reg   = None
 
     for t_obs in T_OBS_VALUES:
         X, feat_names = build_feature_matrix(I_all, t_obs)
@@ -352,7 +376,29 @@ def run_regression(df: pd.DataFrame, I_all: np.ndarray):
             def_y_te       = y_te
             def_y_pred     = y_pred_hgb
             def_idx_te     = idx_te
+            def_idx_tr     = idx_tr
             def_feat_names = feat_names
+
+    # ── Ablation: with vs without graph features at T_OBS_DEFAULT ─────────────
+    if graph_df is not None:
+        X_g, _ = build_feature_matrix(I_all, T_OBS_DEFAULT, graph_df)
+        hgb_g  = hgb_reg_pipe()
+        hgb_g.fit(X_g[def_idx_tr], y_reg[def_idx_tr])
+        y_pred_g = hgb_g.predict(X_g[def_idx_te])
+        ablation_reg = {
+            "without_graph": {
+                "mae": mean_absolute_error(def_y_te, def_y_pred),
+                "r2":  r2_score(def_y_te, def_y_pred),
+            },
+            "with_graph": {
+                "mae": mean_absolute_error(def_y_te, y_pred_g),
+                "r2":  r2_score(def_y_te, y_pred_g),
+            },
+        }
+        print(f"  ablation | w/o graph: MAE={ablation_reg['without_graph']['mae']:.4f}"
+              f"  R²={ablation_reg['without_graph']['r2']:.4f}"
+              f"  | with graph: MAE={ablation_reg['with_graph']['mae']:.4f}"
+              f"  R²={ablation_reg['with_graph']['r2']:.4f}")
 
     # ── Per-model difficulty at T_OBS_DEFAULT ─────────────────────────────────
     te_model_names = df.iloc[def_idx_te]["model_name"].values
@@ -445,12 +491,13 @@ def run_regression(df: pd.DataFrame, I_all: np.ndarray):
     imp_sorted = sorted(feat_imp.items(), key=lambda x: x[1], reverse=True)[:12]
     fi_names  = [x[0] for x in imp_sorted]
     fi_vals   = [x[1] for x in imp_sorted]
-    fi_colors = [CATEGORY_COLORS[FEATURE_CATEGORIES[f]] for f in fi_names]
+    fi_colors = [CATEGORY_COLORS[FEATURE_CATEGORIES.get(f, "graph")] for f in fi_names]
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.barh(fi_names[::-1], fi_vals[::-1], color=fi_colors[::-1])
+    present_cats = {FEATURE_CATEGORIES.get(f, "graph") for f in fi_names}
     handles = [Patch(color=CATEGORY_COLORS[c], label=c.capitalize())
-               for c in CATEGORY_COLORS]
+               for c in CATEGORY_COLORS if c in present_cats]
     ax.legend(handles=handles, fontsize=FS_LEGEND, loc="lower right")
     ax.set_xlabel("Importance", fontsize=FS_LABEL)
     ax.set_title("Feature Importance for Epidemic Size Prediction", fontsize=FS_TITLE)
@@ -458,15 +505,46 @@ def run_regression(df: pd.DataFrame, I_all: np.ndarray):
     fig.tight_layout()
     save_fig(fig, "R4_feature_importance.png")
 
+    # ── Plot R5: Ablation — with vs without graph features ────────────────────
+    if ablation_reg is not None:
+        metrics   = ["MAE (lower=better)", "R² (higher=better)"]
+        wo_vals   = [ablation_reg["without_graph"]["mae"],
+                     ablation_reg["without_graph"]["r2"]]
+        wg_vals   = [ablation_reg["with_graph"]["mae"],
+                     ablation_reg["with_graph"]["r2"]]
+        x         = np.arange(len(metrics))
+        width     = 0.35
+        fig, ax   = plt.subplots(figsize=(7, 4))
+        bars1 = ax.bar(x - width / 2, wo_vals, width, label="Time-series only",
+                       color="#1565C0")
+        bars2 = ax.bar(x + width / 2, wg_vals, width, label="+ Graph features",
+                       color="#FF6F00")
+        for bars in (bars1, bars2):
+            for bar in bars:
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.003,
+                        f"{bar.get_height():.4f}",
+                        ha="center", va="bottom", fontsize=FS_TICK)
+        ax.set_xticks(x)
+        ax.set_xticklabels(metrics, fontsize=FS_LABEL)
+        ax.set_title(f"Ablation: Graph Feature Contribution (t_obs={T_OBS_DEFAULT}, HGB)",
+                     fontsize=FS_TITLE)
+        ax.tick_params(labelsize=FS_TICK)
+        ax.legend(fontsize=FS_LEGEND)
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        save_fig(fig, "R5_ablation_graph_features.png")
+
     print("  Regression complete.")
-    return results_reg, per_model_stats, feat_imp
+    return results_reg, per_model_stats, feat_imp, ablation_reg
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PART 3 — CLASSIFICATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_classification(df: pd.DataFrame, I_all: np.ndarray):
+def run_classification(df: pd.DataFrame, I_all: np.ndarray,
+                       graph_df: pd.DataFrame | None = None):
     print("\n── PART 3: CLASSIFICATION ──────────────────────────")
 
     y_cls = df["model_id"].values
@@ -476,12 +554,16 @@ def run_classification(df: pd.DataFrame, I_all: np.ndarray):
     def_X          = None
     def_y_te       = None
     def_y_pred     = None
+    def_idx_tr     = None
+    def_idx_te     = None
+    def_y_tr       = None
+    ablation_cls   = None
 
     for t_obs in T_OBS_VALUES:
         X, _ = build_feature_matrix(I_all, t_obs)
 
-        X_tr, X_te, y_tr, y_te = train_test_split(
-            X, y_cls,
+        X_tr, X_te, y_tr, y_te, idx_tr, idx_te = train_test_split(
+            X, y_cls, np.arange(len(df)),
             test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_cls,
         )
 
@@ -520,6 +602,30 @@ def run_classification(df: pd.DataFrame, I_all: np.ndarray):
             def_X      = X
             def_y_te   = y_te
             def_y_pred = y_pred_hgbc
+            def_idx_tr = idx_tr
+            def_idx_te = idx_te
+            def_y_tr   = y_tr
+
+    # ── Ablation: with vs without graph features at T_OBS_DEFAULT ─────────────
+    if graph_df is not None:
+        X_g, _ = build_feature_matrix(I_all, T_OBS_DEFAULT, graph_df)
+        hgbc_g = hgb_cls_pipe()
+        hgbc_g.fit(X_g[def_idx_tr], def_y_tr)
+        y_pred_g = hgbc_g.predict(X_g[def_idx_te])
+        ablation_cls = {
+            "without_graph": {
+                "acc": accuracy_score(def_y_te, def_y_pred),
+                "f1":  f1_score(def_y_te, def_y_pred, average="macro"),
+            },
+            "with_graph": {
+                "acc": accuracy_score(def_y_te, y_pred_g),
+                "f1":  f1_score(def_y_te, y_pred_g, average="macro"),
+            },
+        }
+        print(f"  ablation | w/o graph: acc={ablation_cls['without_graph']['acc']:.4f}"
+              f"  F1={ablation_cls['without_graph']['f1']:.4f}"
+              f"  | with graph: acc={ablation_cls['with_graph']['acc']:.4f}"
+              f"  F1={ablation_cls['with_graph']['f1']:.4f}")
 
     n_cls  = len(MODEL_NAMES)
     labels = [ID_TO_MODEL[i] for i in range(n_cls)]
@@ -638,7 +744,7 @@ def run_classification(df: pd.DataFrame, I_all: np.ndarray):
     save_fig(fig, "C4_per_class_f1.png")
 
     print("  Classification complete.")
-    return results_cls, per_class_f1, cross_net_accs, confused_pairs
+    return results_cls, per_class_f1, cross_net_accs, confused_pairs, ablation_cls
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -646,8 +752,8 @@ def run_classification(df: pd.DataFrame, I_all: np.ndarray):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def write_summary(
-    results_reg, per_model_stats, feat_imp,
-    results_cls, per_class_f1, cross_net_accs, confused_pairs,
+    results_reg, per_model_stats, feat_imp, ablation_reg,
+    results_cls, per_class_f1, cross_net_accs, confused_pairs, ablation_cls,
 ):
     print("\n── PART 4: SUMMARY ─────────────────────────────────")
 
@@ -682,8 +788,29 @@ def write_summary(
         f" ({top_pair[2] * 100:.1f}% of the time)",
         f"  Best generalising network:  {best_net[0]}  (accuracy={best_net[1]*100:.1f}%)",
         f"  Worst generalising network: {worst_net[0]}  (accuracy={worst_net[1]*100:.1f}%)",
-        "=" * 60,
     ]
+
+    if ablation_reg is not None and ablation_cls is not None:
+        mae_delta = (ablation_reg["without_graph"]["mae"]
+                     - ablation_reg["with_graph"]["mae"])
+        acc_delta = (ablation_cls["with_graph"]["acc"]
+                     - ablation_cls["without_graph"]["acc"])
+        lines += [
+            "",
+            "GRAPH FEATURE ABLATION (t_obs=30):",
+            f"  Regression  — w/o graph: MAE={ablation_reg['without_graph']['mae']:.4f}"
+            f"  R²={ablation_reg['without_graph']['r2']:.4f}",
+            f"  Regression  — w/  graph: MAE={ablation_reg['with_graph']['mae']:.4f}"
+            f"  R²={ablation_reg['with_graph']['r2']:.4f}"
+            f"  (ΔMAE={mae_delta:+.4f})",
+            f"  Classification — w/o graph: acc={ablation_cls['without_graph']['acc']:.4f}"
+            f"  F1={ablation_cls['without_graph']['f1']:.4f}",
+            f"  Classification — w/  graph: acc={ablation_cls['with_graph']['acc']:.4f}"
+            f"  F1={ablation_cls['with_graph']['f1']:.4f}"
+            f"  (Δacc={acc_delta:+.4f})",
+        ]
+
+    lines.append("=" * 60)
     text = "\n".join(lines)
     print(text)
     (RESULTS_DIR / "summary.txt").write_text(text)
@@ -694,19 +821,21 @@ def write_summary(
 # PART 5 — PERSIST MODELS FOR DEPLOYMENT
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_models(df: pd.DataFrame, I_all: np.ndarray):
+def save_models(df: pd.DataFrame, I_all: np.ndarray,
+                graph_df: pd.DataFrame | None = None):
     """
     Retrain the best regressor and classifier on the FULL dataset at
-    T_OBS_DEFAULT, then serialise four artefacts to ml_data/:
+    T_OBS_DEFAULT, then serialise artefacts to ml_data/:
 
-      rf_regressor.pkl   — HGB regressor  (predicts rho_final from features)
-      rf_classifier.pkl  — HGB classifier (identifies which model produced I(t))
-      label_encoder.pkl  — dict {model_id: model_name}
-      feature_names.pkl  — ordered list of feature names
+      rf_regressor.pkl        — HGB regressor
+      rf_classifier.pkl       — HGB classifier
+      label_encoder.pkl       — dict {model_id: model_name}
+      feature_names.pkl       — ordered list of feature names
+      graph_feature_means.pkl — mean graph feature values (fallback for live app)
     """
     print("\n── PART 5: SAVING MODELS ───────────────────────────")
 
-    X, feat_names = build_feature_matrix(I_all, T_OBS_DEFAULT)
+    X, feat_names = build_feature_matrix(I_all, T_OBS_DEFAULT, graph_df)
     y_reg = df["rho_final"].values
     y_cls = df["model_id"].values
 
@@ -728,6 +857,11 @@ def save_models(df: pd.DataFrame, I_all: np.ndarray):
     print(f"  label_encoder.pkl — {label_encoder}")
     print(f"  feature_names.pkl — {len(feat_names)} features: {', '.join(feat_names)}")
 
+    if graph_df is not None:
+        graph_feat_means = {col: float(graph_df[col].mean()) for col in graph_df.columns}
+        joblib.dump(graph_feat_means, DATA_DIR / "graph_feature_means.pkl")
+        print(f"  graph_feature_means.pkl — means for {len(graph_feat_means)} graph features")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -735,19 +869,24 @@ def main():
     t0 = time.time()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    df, I_all = load_data()
+    df, I_all, graph_feat_cols = load_data()
+    graph_df = df[graph_feat_cols].copy() if graph_feat_cols else None
 
     print("\n── PART 1: FEATURE EXTRACTION ──────────────────────")
     sample = extract_features(I_all[0], T_OBS_DEFAULT)
-    print(f"  {len(sample)} features: {', '.join(sample.keys())}")
+    print(f"  {len(sample)} time-series features: {', '.join(sample.keys())}")
 
-    results_reg, per_model_stats, feat_imp = run_regression(df, I_all)
-    results_cls, per_class_f1, cross_net_accs, confused_pairs = run_classification(df, I_all)
-    write_summary(
-        results_reg, per_model_stats, feat_imp,
-        results_cls, per_class_f1, cross_net_accs, confused_pairs,
+    results_reg, per_model_stats, feat_imp, ablation_reg = run_regression(
+        df, I_all, graph_df
     )
-    save_models(df, I_all)
+    results_cls, per_class_f1, cross_net_accs, confused_pairs, ablation_cls = (
+        run_classification(df, I_all, graph_df)
+    )
+    write_summary(
+        results_reg, per_model_stats, feat_imp, ablation_reg,
+        results_cls, per_class_f1, cross_net_accs, confused_pairs, ablation_cls,
+    )
+    save_models(df, I_all, graph_df)
 
     print(f"\nTotal runtime: {time.time() - t0:.1f} s")
 

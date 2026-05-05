@@ -201,7 +201,7 @@ def run_app() -> None:
         config = render_sidebar(model="h6")
         _render_tabs_h6(graph, config)
     elif model == "ml":
-        st.title("Virality Predictor")
+        st.title("Cascade predictor")
         with st.sidebar:
             if st.button("← Back to Lab", use_container_width=True):
                 st.session_state.pop(SessionKeys.MODEL, None)
@@ -602,8 +602,8 @@ def _render_tabs_h6(graph, config) -> None:
 
 def _render_tabs_ml() -> None:
     tab_predict, tab_learn, tab_about = st.tabs([
-        "🔮 Will It Go Viral?",
-        "📚 How Does It Spread?",
+        "Prediction",
+        "How Does It Spread?",
         "ℹ️ About",
     ])
     with tab_predict:
