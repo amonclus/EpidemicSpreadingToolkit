@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 
-NUM_CLASSES = 10
+NUM_CLASSES    = 10
+EMBEDDING_DIM  = 64   # shared across all architectures
 
 
 class _Heads(nn.Module):
@@ -139,3 +140,27 @@ class TransformerEmbedder(nn.Module):
             tokens, tokens, tokens, need_weights=True, average_attn_weights=False
         )
         return attn  # (batch, nhead, seq, seq)
+
+
+# ---------------------------------------------------------------------------
+# Specialist regression head (two-stage pipeline)
+# ---------------------------------------------------------------------------
+
+class SpecialistRegHead(nn.Module):
+    """
+    Standalone regression head for the two-stage specialist regressor.
+    Receives a pre-computed embedding (backbone_output ++ hand-crafted features)
+    and predicts rho_final for one specific epidemic model class.
+    """
+
+    def __init__(self, in_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, emb: torch.Tensor) -> torch.Tensor:
+        return self.net(emb).squeeze(-1)

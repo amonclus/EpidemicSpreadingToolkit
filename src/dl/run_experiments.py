@@ -3,6 +3,7 @@ Master script for the deep-learning epidemic pipeline.
 Run from the src/ directory:
     python -m dl.run_experiments
 """
+import copy
 import os
 import sys
 import random
@@ -11,6 +12,8 @@ import joblib
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 
 # ── Toggle flags ────────────────────────────────────────────────────────────
@@ -19,6 +22,7 @@ TRAIN_LSTM        = True
 TRAIN_TRANSFORMER = True
 TRAIN_ENSEMBLE    = True
 TRAIN_MOE         = False
+TRAIN_TWO_STAGE   = True   # two-stage specialist training (CNN only, T_OBS_DEFAULT)
 RUN_VISUALISATIONS = False
 FORCE_RETRAIN     = False
 
@@ -33,7 +37,7 @@ PATIENCE      = 15
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CKPT_DIR = os.path.join(os.path.dirname(__file__), "checkpoints")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results", "dl")
-DATA_DIR    = os.path.join(os.path.dirname(__file__), "..", "ml_data")
+DATA_DIR    = os.path.join(os.path.dirname(__file__), "..", "ml", "ml_data")
 os.makedirs(CKPT_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -51,22 +55,22 @@ if __package__ is None or __package__ == "":
     _pkg_dir = str(pathlib.Path(__file__).parent.parent)
     if _pkg_dir not in sys.path:
         sys.path.insert(0, _pkg_dir)
-    from dl.dataset import get_dataloaders, EpidemicDataset
-    from dl.models import CNNEmbedder, LSTMEmbedder, TransformerEmbedder
+    from dl.dataset import get_dataloaders, EpidemicDataset, filter_by_model
+    from dl.models import CNNEmbedder, LSTMEmbedder, TransformerEmbedder, SpecialistRegHead, EMBEDDING_DIM
     from dl.trainer import Trainer
     from dl.mixture_of_experts import MixtureOfExperts
-    from dl.wrappers import DLRegressor, DLClassifier
+    from dl.wrappers import DLRegressor, DLClassifier, DLTwoStageRegressor
     from dl.visualisation import (
         plot_R1_mae_vs_window, plot_R2_pred_vs_true, plot_R3_per_model_mae,
         plot_R4_embedding_2d, plot_C1_accuracy_vs_window, plot_C2_confusion_matrix,
         plot_C3_cross_network, plot_C4_per_class_f1, plot_attention_weights,
     )
 else:
-    from .dataset import get_dataloaders, EpidemicDataset
-    from .models import CNNEmbedder, LSTMEmbedder, TransformerEmbedder
+    from .dataset import get_dataloaders, EpidemicDataset, filter_by_model
+    from .models import CNNEmbedder, LSTMEmbedder, TransformerEmbedder, SpecialistRegHead, EMBEDDING_DIM
     from .trainer import Trainer
     from .mixture_of_experts import MixtureOfExperts
-    from .wrappers import DLRegressor, DLClassifier
+    from .wrappers import DLRegressor, DLClassifier, DLTwoStageRegressor
     from .visualisation import (
         plot_R1_mae_vs_window, plot_R2_pred_vs_true, plot_R3_per_model_mae,
         plot_R4_embedding_2d, plot_C1_accuracy_vs_window, plot_C2_confusion_matrix,
@@ -150,6 +154,91 @@ def _load_or_train(arch_name: str, t_obs: int, train_loader, val_loader, n_featu
     return model, history
 
 
+def _spec_ckpt_path(t_obs: int) -> str:
+    return os.path.join(CKPT_DIR, f"CNN_specialists_t{t_obs}.pt")
+
+
+_MODEL_NAMES = ["SIR", "SIS", "BP", "WTM", "H1", "H2", "H3", "H4", "H5", "H6"]
+
+
+def _train_specialist_heads(cnn_model, n_features: int, t_obs: int,
+                             train_ds, val_ds,
+                             n_epochs: int = 60, patience: int = 10) -> dict:
+    """
+    Train one SpecialistRegHead per epidemic model class (0–9).
+    The CNN backbone is frozen; only the small regression head is trained.
+
+    Returns {model_id: state_dict or None}
+    """
+    backbone = cnn_model.backbone  # nn.Sequential — shared, frozen
+    backbone.eval()
+
+    in_dim = EMBEDDING_DIM + n_features
+    best_heads = {}
+
+    for k in range(10):
+        train_ds_k = filter_by_model(train_ds, k)
+        val_ds_k   = filter_by_model(val_ds, k)
+        n_train    = len(train_ds_k)
+
+        if n_train < 20:
+            print(f"  Specialist {k} ({_MODEL_NAMES[k]}): only {n_train} samples — skipping.")
+            best_heads[k] = None
+            continue
+
+        print(f"  Specialist {k} ({_MODEL_NAMES[k]}): {n_train} train / {len(val_ds_k)} val")
+
+        head = SpecialistRegHead(in_dim).to(DEVICE)
+        opt  = torch.optim.Adam(head.parameters(), lr=1e-3, weight_decay=1e-4)
+        sch  = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=5, factor=0.5)
+
+        bs_k = min(64, n_train)
+        tl_k = DataLoader(train_ds_k, batch_size=bs_k, shuffle=True)
+        vl_k = DataLoader(val_ds_k,   batch_size=min(64, max(1, len(val_ds_k))), shuffle=False)
+
+        best_val_mae = float("inf")
+        best_state   = None
+        no_improve   = 0
+
+        for epoch in range(1, n_epochs + 1):
+            head.train()
+            for x, rho, _, feat in tl_k:
+                x, rho, feat = x.to(DEVICE), rho.to(DEVICE), feat.to(DEVICE)
+                with torch.no_grad():
+                    raw_emb = backbone(x.unsqueeze(1))
+                emb = torch.cat([raw_emb, feat], dim=-1) if n_features > 0 else raw_emb
+                loss = F.mse_loss(head(emb), rho)
+                opt.zero_grad(); loss.backward(); opt.step()
+
+            head.eval()
+            val_maes = []
+            with torch.no_grad():
+                for x, rho, _, feat in vl_k:
+                    x, rho, feat = x.to(DEVICE), rho.to(DEVICE), feat.to(DEVICE)
+                    raw_emb = backbone(x.unsqueeze(1))
+                    emb = torch.cat([raw_emb, feat], dim=-1) if n_features > 0 else raw_emb
+                    val_maes.append(torch.abs(head(emb) - rho).mean().item())
+
+            val_mae = float(np.mean(val_maes))
+            sch.step(val_mae)
+
+            if val_mae < best_val_mae:
+                best_val_mae = val_mae
+                best_state   = copy.deepcopy(head.state_dict())
+                no_improve   = 0
+            else:
+                no_improve += 1
+
+            if no_improve >= patience:
+                print(f"    Early stop epoch {epoch}, best val MAE={best_val_mae:.4f}")
+                break
+
+        best_heads[k] = best_state
+        print(f"  Specialist {k} ({_MODEL_NAMES[k]}): best val MAE={best_val_mae:.4f}")
+
+    return best_heads
+
+
 def _rf_baseline_mae(test_loader):
     rf_path   = os.path.join(DATA_DIR, "rf_regressor.pkl")
     feat_path = os.path.join(DATA_DIR, "feature_names.pkl")
@@ -189,10 +278,10 @@ def _rf_baseline_mae(test_loader):
 
 def save_dl_models(arch_name: str = "CNN", t_obs: int = T_OBS_DEFAULT):
     """
-    Wrap a trained DL model as sklearn-compatible objects and serialise to ml_data/:
+    Wrap trained DL models as sklearn-compatible objects and serialise to ml_data/:
 
-      dl_regressor.pkl  — DLRegressor  (predicts rho_final from raw I(t)/N series)
-      dl_classifier.pkl — DLClassifier (predicts model_id  from raw I(t)/N series)
+      dl_regressor.pkl  — DLTwoStageRegressor if specialists exist, else DLRegressor
+      dl_classifier.pkl — DLClassifier (predicts model_id from raw I(t)/N series)
 
     Mirrors ml_analysis.py's save_models() so the app can load both identically.
     Requires a bundle checkpoint (run run_experiments.py at least once first).
@@ -222,7 +311,16 @@ def save_dl_models(arch_name: str = "CNN", t_obs: int = T_OBS_DEFAULT):
         feat_std   = data["feat_std"],
     )
 
-    reg = DLRegressor(**kwargs)
+    # Use two-stage regressor if specialist checkpoint is available
+    spec_ckpt = _spec_ckpt_path(t_obs)
+    if os.path.exists(spec_ckpt):
+        spec_data = torch.load(spec_ckpt, map_location="cpu", weights_only=False)
+        reg = DLTwoStageRegressor(**kwargs, specialist_heads=spec_data["reg_heads"])
+        reg_label = "DLTwoStageRegressor"
+    else:
+        reg = DLRegressor(**kwargs)
+        reg_label = "DLRegressor"
+
     clf = DLClassifier(**kwargs)
 
     reg_path = os.path.join(DATA_DIR, "dl_regressor.pkl")
@@ -230,7 +328,7 @@ def save_dl_models(arch_name: str = "CNN", t_obs: int = T_OBS_DEFAULT):
     joblib.dump(reg, reg_path)
     joblib.dump(clf, clf_path)
 
-    print(f"  dl_regressor.pkl  — DLRegressor  ({arch_name}, t_obs={t_obs}, "
+    print(f"  dl_regressor.pkl  — {reg_label} ({arch_name}, t_obs={t_obs}, "
           f"n_features={data['n_features']})")
     print(f"  dl_classifier.pkl — DLClassifier ({arch_name}, t_obs={t_obs}, "
           f"n_features={data['n_features']})")
@@ -368,9 +466,127 @@ def main():
                 moe_results[key] = res
                 print(f"  MoE-{mode} | MAE={res['MAE']:.4f}  R2={res['R2']:.4f}")
 
+    # ── 2.5 Two-stage specialist training (CNN, T_OBS_DEFAULT) ───────────────
+    two_stage_results = {}
+
+    if TRAIN_TWO_STAGE and "CNN" in trained_models and T_OBS_DEFAULT in trained_models["CNN"]:
+        spec_ckpt = _spec_ckpt_path(T_OBS_DEFAULT)
+
+        if os.path.exists(spec_ckpt) and not FORCE_RETRAIN:
+            print(f"\nLoading specialist checkpoint: {spec_ckpt}")
+            spec_data = torch.load(spec_ckpt, map_location=DEVICE, weights_only=False)
+            specialist_heads = spec_data["reg_heads"]
+        else:
+            print(f"\n{'='*60}")
+            print(f"Two-stage: training specialist heads (CNN, t_obs={T_OBS_DEFAULT})")
+            print(f"{'='*60}")
+            train_loader_spec, val_loader_spec, _ = get_dataloaders(
+                t_obs=T_OBS_DEFAULT, batch_size=BATCH_SIZE, seed=42
+            )
+            cnn_model = trained_models["CNN"][T_OBS_DEFAULT]
+            specialist_heads = _train_specialist_heads(
+                cnn_model, n_features, T_OBS_DEFAULT,
+                train_loader_spec.dataset, val_loader_spec.dataset,
+            )
+            torch.save(
+                {"reg_heads": specialist_heads, "t_obs": T_OBS_DEFAULT, "n_features": n_features},
+                spec_ckpt,
+            )
+            print(f"  Saved specialist checkpoint: {spec_ckpt}")
+
+        # ── Evaluate two-stage on the test set ────────────────────────────
+        print(f"\nEvaluating two-stage regressor (t_obs={T_OBS_DEFAULT}) ...")
+        _, _, test_loader_spec = get_dataloaders(
+            t_obs=T_OBS_DEFAULT, batch_size=BATCH_SIZE, seed=42
+        )
+        cnn = trained_models["CNN"][T_OBS_DEFAULT].to(DEVICE)
+        cnn.eval()
+
+        in_dim   = EMBEDDING_DIM + n_features
+        spec_heads_loaded = {}
+        for k, sd in specialist_heads.items():
+            if sd is not None:
+                h = SpecialistRegHead(in_dim).to(DEVICE)
+                h.load_state_dict(sd); h.eval()
+                spec_heads_loaded[k] = h
+
+        rho_pred_hard, rho_pred_oracle, rho_true_all, cls_pred_all, cls_true_all = [], [], [], [], []
+
+        with torch.no_grad():
+            for x, rho, mid, feat in test_loader_spec:
+                x, feat = x.to(DEVICE), feat.to(DEVICE)
+
+                # Stage 1: classify
+                gen_rho, logits = cnn(x, feat)
+                pred_ids = logits.argmax(dim=1).cpu().numpy()
+                true_ids = mid.numpy()
+
+                # Shared backbone embedding
+                raw_emb  = cnn.backbone(x.unsqueeze(1))
+                full_emb = torch.cat([raw_emb, feat], dim=-1) if n_features > 0 else raw_emb
+
+                rho_np  = rho.numpy()
+                gen_np  = gen_rho.cpu().numpy()
+                hard_np = gen_np.copy()
+                ora_np  = gen_np.copy()
+
+                for k in range(10):
+                    h = spec_heads_loaded.get(k)
+                    if h is None:
+                        continue
+                    hard_mask = pred_ids == k
+                    ora_mask  = true_ids == k
+                    mask_t_hard = torch.from_numpy(hard_mask).to(DEVICE)
+                    mask_t_ora  = torch.from_numpy(ora_mask).to(DEVICE)
+                    if hard_mask.any():
+                        hard_np[hard_mask] = h(full_emb[mask_t_hard]).cpu().numpy()
+                    if ora_mask.any():
+                        ora_np[ora_mask]   = h(full_emb[mask_t_ora]).cpu().numpy()
+
+                rho_pred_hard.append(hard_np)
+                rho_pred_oracle.append(ora_np)
+                rho_true_all.append(rho_np)
+                cls_pred_all.append(pred_ids)
+                cls_true_all.append(true_ids)
+
+        rho_hard   = np.concatenate(rho_pred_hard)
+        rho_oracle = np.concatenate(rho_pred_oracle)
+        rho_true   = np.concatenate(rho_true_all)
+        ts_cls_pred = np.concatenate(cls_pred_all)
+        ts_cls_true = np.concatenate(cls_true_all)
+        ts_test_indices = test_loader_spec.dataset.indices
+
+        def _metrics(pred, true):
+            mae = float(np.abs(pred - true).mean())
+            ss_r = float(((true - pred) ** 2).sum())
+            ss_t = float(((true - true.mean()) ** 2).sum())
+            r2   = 1.0 - ss_r / ss_t if ss_t > 0 else 0.0
+            return {"MAE": mae, "R2": r2}
+
+        two_stage_results["TwoStage_hard"]   = _metrics(rho_hard,   rho_true)
+        two_stage_results["TwoStage_oracle"] = _metrics(rho_oracle, rho_true)
+
+        # Add to all_results so TwoStage_hard appears as a point in R1/C1 plots
+        cnn_cls_metrics = all_results.get("CNN", {}).get(T_OBS_DEFAULT, {})
+        all_results["TwoStage_hard"] = {
+            T_OBS_DEFAULT: {
+                "MAE":       two_stage_results["TwoStage_hard"]["MAE"],
+                "R2":        two_stage_results["TwoStage_hard"]["R2"],
+                "accuracy":  cnn_cls_metrics.get("accuracy",  float("nan")),
+                "macro_f1":  cnn_cls_metrics.get("macro_f1",  float("nan")),
+            }
+        }
+
+        print(f"  Hard routing  | MAE={two_stage_results['TwoStage_hard']['MAE']:.4f}  "
+              f"R2={two_stage_results['TwoStage_hard']['R2']:.4f}")
+        print(f"  Oracle routing| MAE={two_stage_results['TwoStage_oracle']['MAE']:.4f}  "
+              f"R2={two_stage_results['TwoStage_oracle']['R2']:.4f}")
+
     # ── 3. Collect per-sample predictions at T_OBS_DEFAULT ───────────────────
     df_full = pd.read_csv(os.path.join(DATA_DIR, "ml_dataset.csv"))
     detail  = {}   # {arch_name: {rho_pred, rho_true, cls_pred, cls_true, net_types, mae, r2}}
+    # Note: df_full is also used in section 2.5 for net_types — keep it here (section 3
+    # runs after 2.5, net_types are attached to detail at the end of this section).
 
     if trained_models:
         _, _, test_loader_def = get_dataloaders(
@@ -439,6 +655,20 @@ def main():
                     cls_pred=ens_cls_pred, cls_true=cls_true_ref,
                     net_types=net_ref, mae=ens_mae, r2=ens_r2,
                 )
+
+        # Add TwoStage_hard to detail for per-sample visualisation plots
+        if two_stage_results and "CNN" in detail:
+            ts_net_types = df_full.iloc[ts_test_indices]["network_type"].values
+            ts_m = two_stage_results["TwoStage_hard"]
+            detail["TwoStage_hard"] = dict(
+                rho_pred  = rho_hard,
+                rho_true  = rho_true,
+                cls_pred  = ts_cls_pred,
+                cls_true  = ts_cls_true,
+                net_types = ts_net_types,
+                mae       = ts_m["MAE"],
+                r2        = ts_m["R2"],
+            )
 
     # ── 4. Visualisations ─────────────────────────────────────────────────────
     if RUN_VISUALISATIONS:
@@ -524,6 +754,12 @@ def main():
             })
         if t_obs == T_OBS_DEFAULT:
             for key, res in moe_results.items():
+                rows.append({
+                    "Model": key, "t_obs": t_obs,
+                    "MAE": f"{res['MAE']:.4f}", "R2": f"{res['R2']:.4f}",
+                    "Accuracy": "-", "F1": "-",
+                })
+            for key, res in two_stage_results.items():
                 rows.append({
                     "Model": key, "t_obs": t_obs,
                     "MAE": f"{res['MAE']:.4f}", "R2": f"{res['R2']:.4f}",

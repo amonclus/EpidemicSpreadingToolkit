@@ -11,6 +11,10 @@ Usage:
 
     # Optionally pass graph features (n, n_graph_feats); zeros used as fallback.
     rho  = reg.predict(I_series_matrix, graph_features=gf)
+
+Two-stage regressor (drop-in replacement for DLRegressor):
+    reg = joblib.load("ml_data/dl_regressor.pkl")   # may be DLTwoStageRegressor
+    rho = reg.predict(I_series_matrix)               # same interface
 """
 
 import numpy as np
@@ -125,3 +129,87 @@ class DLClassifier(_DLWrapper):
         with torch.no_grad():
             _, logits = model(x, feat)
         return torch.softmax(logits, dim=1).numpy()
+
+
+class DLTwoStageRegressor(_DLWrapper):
+    """
+    Two-stage regressor (drop-in replacement for DLRegressor):
+
+      Stage 1 — CNN classifier identifies the epidemic model type (0–9)
+      Stage 2 — specialist regression head predicts rho_final for that type
+
+    Each specialist head is trained only on data from its own model class,
+    so it learns the specific rho curve shape without cross-model interference.
+    The backbone (feature extractor) is shared and frozen from the Stage-1 CNN.
+
+    Falls back to the generalist regression head for any class whose specialist
+    could not be trained (too few samples).
+    """
+
+    def __init__(self, state_dict, arch_name, n_features, t_obs,
+                 norm_max, feat_mean, feat_std, specialist_heads: dict):
+        """
+        Parameters
+        ----------
+        specialist_heads : dict {model_id (int): state_dict or None}
+            Trained SpecialistRegHead state dicts, one per epidemic class.
+            None means fall back to the generalist regression head for that class.
+        """
+        super().__init__(state_dict, arch_name, n_features, t_obs,
+                         norm_max, feat_mean, feat_std)
+        self._specialist_heads = specialist_heads
+        self._spec_cache: dict = {}
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state["_spec_cache"] = {}
+        return state
+
+    def _get_specialist(self, k: int):
+        if k not in self._spec_cache:
+            from .models import SpecialistRegHead, EMBEDDING_DIM
+            sd = self._specialist_heads.get(k)
+            if sd is None:
+                self._spec_cache[k] = None
+            else:
+                head = SpecialistRegHead(EMBEDDING_DIM + self._n_features)
+                head.load_state_dict(sd)
+                head.eval()
+                self._spec_cache[k] = head
+        return self._spec_cache[k]
+
+    def predict(self, I_series_matrix, graph_features=None):
+        """
+        Parameters
+        ----------
+        I_series_matrix : array-like, shape (n, T)
+        graph_features  : array-like, shape (n, n_graph_feats), optional
+
+        Returns
+        -------
+        rho_pred : np.ndarray, shape (n,)
+        """
+        model = self._get_model()
+        x, feat = self._prepare(I_series_matrix, graph_features)
+
+        with torch.no_grad():
+            # Stage 1: classify to get routing labels
+            generalist_rho, logits = model(x, feat)
+            model_ids = logits.argmax(dim=1).numpy()  # (n,)
+
+            # Shared backbone embedding for all specialists
+            raw_emb  = model.get_embedding(x)                          # (n, 64)
+            full_emb = torch.cat([raw_emb, feat], dim=-1) if self._n_features > 0 else raw_emb
+
+            # Stage 2: route each sample to its specialist
+            rho_pred = generalist_rho.numpy().copy()  # fallback values
+            for k in range(10):
+                mask = model_ids == k
+                if not mask.any():
+                    continue
+                specialist = self._get_specialist(k)
+                if specialist is not None:
+                    mask_t = torch.from_numpy(mask)
+                    rho_pred[mask] = specialist(full_emb[mask_t]).numpy()
+
+        return rho_pred

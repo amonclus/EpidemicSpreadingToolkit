@@ -47,9 +47,11 @@ _ID_TO_NAME  = MODEL_NAMES
 
 # Arch line styles (matches the HGB/RF/Ridge palette where comparable)
 _ARCH_STYLE = {
-    "CNN":         ("^-",  "#2E7D32", 2),
-    "LSTM":        ("o-",  "#1565C0", 2),
-    "Transformer": ("s--", "#B71C1C", 2),
+    "CNN":           ("^-",  "#2E7D32", 2),
+    "LSTM":          ("o-",  "#1565C0", 2),
+    "Transformer":   ("s--", "#B71C1C", 2),
+    "Ensemble":      ("D-",  "#FF6F00", 2),
+    "TwoStage_hard": ("P-",  "#6A1B9A", 2),
 }
 _HGB_STYLE = ("D:",  "#FF6F00", 1.5)   # HGB baseline reference
 

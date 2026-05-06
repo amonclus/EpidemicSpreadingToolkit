@@ -8,7 +8,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from .features import extract_features_batch
 from analysis.graph_features import GRAPH_FEATURE_NAMES
 
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "ml_data")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "ml", "ml_data")
 _CSV_PATH = os.path.join(_DATA_DIR, "ml_dataset.csv")
 _NPY_PATH = os.path.join(_DATA_DIR, "ml_I_series.npy")
 
@@ -106,6 +106,20 @@ class EpidemicDataset(Dataset):
         feat   = torch.tensor(self.features[i],  dtype=torch.float32)
 
         return x, rho, mid, feat
+
+
+def filter_by_model(dataset: "EpidemicDataset", model_id: int) -> "EpidemicDataset":
+    """
+    Shallow-copy dataset with indices restricted to a single epidemic model class.
+    Preserves the original train/val/test split — only filters within the split.
+    """
+    import copy
+    ds = copy.copy(dataset)
+    ds.indices = np.array(
+        [i for i in dataset.indices if dataset.model_ids[i] == model_id],
+        dtype=np.int64,
+    )
+    return ds
 
 
 def _stratified_split(n, labels, seed=42):
