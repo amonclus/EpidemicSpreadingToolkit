@@ -15,6 +15,12 @@ Usage:
 Two-stage regressor (drop-in replacement for DLRegressor):
     reg = joblib.load("ml_data/dl_regressor.pkl")   # may be DLTwoStageRegressor
     rho = reg.predict(I_series_matrix)               # same interface
+
+Dynamic wrappers (select best-matching t_obs at inference):
+    reg = joblib.load("ml_data/dl_regressor.pkl")   # DLDynamicRegressor
+    clf = joblib.load("ml_data/dl_classifier.pkl")  # DLDynamicClassifier
+    # Model with t_obs closest to (but not exceeding) input length is used.
+    # Falls back to smallest available t_obs if input is shorter than all windows.
 """
 
 import numpy as np
@@ -213,3 +219,56 @@ class DLTwoStageRegressor(_DLWrapper):
                     rho_pred[mask] = specialist(full_emb[mask_t]).numpy()
 
         return rho_pred
+
+
+# ── Dynamic wrappers ──────────────────────────────────────────────────────────
+
+class _DLDynamicBase:
+    """
+    Holds one inner model per t_obs and routes each call to the model whose
+    window best matches the actual input length:
+      - largest available t_obs that does not exceed the input length, OR
+      - smallest available t_obs if the input is shorter than all windows.
+    """
+
+    def __init__(self, models: dict):
+        """
+        Parameters
+        ----------
+        models : dict {t_obs (int): DLRegressor / DLClassifier / DLTwoStageRegressor}
+        """
+        if not models:
+            raise ValueError("models dict must not be empty")
+        self._models = models
+        self._t_obs_sorted = sorted(models.keys())
+
+    def _select(self, n_steps: int) -> int:
+        candidates = [t for t in self._t_obs_sorted if t <= n_steps]
+        return max(candidates) if candidates else self._t_obs_sorted[0]
+
+    @property
+    def t_obs_available(self):
+        return list(self._t_obs_sorted)
+
+
+class DLDynamicRegressor(_DLDynamicBase):
+    """Dynamic regressor — selects the best-matching t_obs model per call."""
+
+    def predict(self, I_series_matrix, graph_features=None):
+        n_steps = np.asarray(I_series_matrix).shape[1]
+        t_obs   = self._select(n_steps)
+        return self._models[t_obs].predict(I_series_matrix, graph_features)
+
+
+class DLDynamicClassifier(_DLDynamicBase):
+    """Dynamic classifier — selects the best-matching t_obs model per call."""
+
+    def predict(self, I_series_matrix, graph_features=None):
+        n_steps = np.asarray(I_series_matrix).shape[1]
+        t_obs   = self._select(n_steps)
+        return self._models[t_obs].predict(I_series_matrix, graph_features)
+
+    def predict_proba(self, I_series_matrix, graph_features=None):
+        n_steps = np.asarray(I_series_matrix).shape[1]
+        t_obs   = self._select(n_steps)
+        return self._models[t_obs].predict_proba(I_series_matrix, graph_features)

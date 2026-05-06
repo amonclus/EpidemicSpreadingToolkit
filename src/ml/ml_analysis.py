@@ -99,8 +99,8 @@ CATEGORY_COLORS = {
     "graph":    "#FF6F00",
 }
 
-DATA_DIR    = Path("ml/ml_data")
-RESULTS_DIR = Path("results/ml")
+DATA_DIR    = Path("ml_data")
+RESULTS_DIR = Path("../results/ml")
 
 FS_TITLE  = 14
 FS_LABEL  = 12

@@ -23,7 +23,7 @@ TRAIN_TRANSFORMER = True
 TRAIN_ENSEMBLE    = True
 TRAIN_MOE         = False
 TRAIN_TWO_STAGE   = True   # two-stage specialist training (CNN only, T_OBS_DEFAULT)
-RUN_VISUALISATIONS = False
+RUN_VISUALISATIONS = True
 FORCE_RETRAIN     = False
 
 T_OBS_VALUES  = [10, 20, 30, 50, 75]
@@ -59,7 +59,7 @@ if __package__ is None or __package__ == "":
     from dl.models import CNNEmbedder, LSTMEmbedder, TransformerEmbedder, SpecialistRegHead, EMBEDDING_DIM
     from dl.trainer import Trainer
     from dl.mixture_of_experts import MixtureOfExperts
-    from dl.wrappers import DLRegressor, DLClassifier, DLTwoStageRegressor
+    from dl.wrappers import DLRegressor, DLClassifier, DLTwoStageRegressor, DLDynamicRegressor, DLDynamicClassifier
     from dl.visualisation import (
         plot_R1_mae_vs_window, plot_R2_pred_vs_true, plot_R3_per_model_mae,
         plot_R4_embedding_2d, plot_C1_accuracy_vs_window, plot_C2_confusion_matrix,
@@ -70,7 +70,7 @@ else:
     from .models import CNNEmbedder, LSTMEmbedder, TransformerEmbedder, SpecialistRegHead, EMBEDDING_DIM
     from .trainer import Trainer
     from .mixture_of_experts import MixtureOfExperts
-    from .wrappers import DLRegressor, DLClassifier, DLTwoStageRegressor
+    from .wrappers import DLRegressor, DLClassifier, DLTwoStageRegressor, DLDynamicRegressor, DLDynamicClassifier
     from .visualisation import (
         plot_R1_mae_vs_window, plot_R2_pred_vs_true, plot_R3_per_model_mae,
         plot_R4_embedding_2d, plot_C1_accuracy_vs_window, plot_C2_confusion_matrix,
@@ -280,58 +280,71 @@ def save_dl_models(arch_name: str = "CNN", t_obs: int = T_OBS_DEFAULT):
     """
     Wrap trained DL models as sklearn-compatible objects and serialise to ml_data/:
 
-      dl_regressor.pkl  — DLTwoStageRegressor if specialists exist, else DLRegressor
-      dl_classifier.pkl — DLClassifier (predicts model_id from raw I(t)/N series)
+      dl_regressor.pkl  — DLDynamicRegressor  (auto-selects best t_obs for input length)
+      dl_classifier.pkl — DLDynamicClassifier (same)
 
-    Mirrors ml_analysis.py's save_models() so the app can load both identically.
-    Requires a bundle checkpoint (run run_experiments.py at least once first).
+    Collects all available CNN checkpoints across T_OBS_VALUES. At each t_obs,
+    uses DLTwoStageRegressor if a specialist checkpoint exists, else DLRegressor.
+    Falls back to a single-model wrapper if only one checkpoint is available.
     """
-    print(f"\n── SAVING DL MODELS ({arch_name}, t_obs={t_obs}) ───────────────────")
-    ckpt = _ckpt_path(arch_name, t_obs)
-    if not os.path.exists(ckpt):
+    print(f"\n── SAVING DL MODELS ({arch_name}) ───────────────────────────────────")
+
+    reg_models: dict = {}
+    clf_models: dict = {}
+
+    for t in T_OBS_VALUES:
+        ckpt = _ckpt_path(arch_name, t)
+        if not os.path.exists(ckpt):
+            continue
+
+        data = torch.load(ckpt, map_location="cpu", weights_only=False)
+        if not isinstance(data, dict) or "state_dict" not in data:
+            print(f"  Skipping t_obs={t}: old checkpoint format (retrain to upgrade).")
+            continue
+
+        kwargs = dict(
+            state_dict = data["state_dict"],
+            arch_name  = data["arch_name"],
+            n_features = data["n_features"],
+            t_obs      = data["t_obs"],
+            norm_max   = data["norm_max"],
+            feat_mean  = data["feat_mean"],
+            feat_std   = data["feat_std"],
+        )
+
+        spec_ckpt = _spec_ckpt_path(t)
+        if os.path.exists(spec_ckpt):
+            spec_data  = torch.load(spec_ckpt, map_location="cpu", weights_only=False)
+            reg_models[t] = DLTwoStageRegressor(**kwargs, specialist_heads=spec_data["reg_heads"])
+            reg_label  = "TwoStage"
+        else:
+            reg_models[t] = DLRegressor(**kwargs)
+            reg_label  = "generalist"
+
+        clf_models[t] = DLClassifier(**kwargs)
+        print(f"  t_obs={t:3d}: {reg_label} regressor + classifier loaded")
+
+    if not reg_models:
         raise FileNotFoundError(
-            f"No checkpoint found: {ckpt}\n"
-            "Run run_experiments.py first to train the model."
+            f"No bundle checkpoints found for {arch_name}.\n"
+            "Run run_experiments.py first to train the models."
         )
 
-    data = torch.load(ckpt, map_location="cpu", weights_only=False)
-    if not isinstance(data, dict) or "state_dict" not in data:
-        raise ValueError(
-            f"{ckpt} is in old format (raw state_dict).\n"
-            "Load it once via run_experiments.py to auto-upgrade, then retry."
-        )
-
-    kwargs = dict(
-        state_dict = data["state_dict"],
-        arch_name  = data["arch_name"],
-        n_features = data["n_features"],
-        t_obs      = data["t_obs"],
-        norm_max   = data["norm_max"],
-        feat_mean  = data["feat_mean"],
-        feat_std   = data["feat_std"],
-    )
-
-    # Use two-stage regressor if specialist checkpoint is available
-    spec_ckpt = _spec_ckpt_path(t_obs)
-    if os.path.exists(spec_ckpt):
-        spec_data = torch.load(spec_ckpt, map_location="cpu", weights_only=False)
-        reg = DLTwoStageRegressor(**kwargs, specialist_heads=spec_data["reg_heads"])
-        reg_label = "DLTwoStageRegressor"
+    if len(reg_models) > 1:
+        reg = DLDynamicRegressor(reg_models)
+        clf = DLDynamicClassifier(clf_models)
+        wrapper_label = f"DLDynamicRegressor/Classifier ({len(reg_models)} windows: {sorted(reg_models)})"
     else:
-        reg = DLRegressor(**kwargs)
-        reg_label = "DLRegressor"
-
-    clf = DLClassifier(**kwargs)
+        t_only = next(iter(reg_models))
+        reg = reg_models[t_only]
+        clf = clf_models[t_only]
+        wrapper_label = f"single t_obs={t_only}"
 
     reg_path = os.path.join(DATA_DIR, "dl_regressor.pkl")
     clf_path = os.path.join(DATA_DIR, "dl_classifier.pkl")
     joblib.dump(reg, reg_path)
     joblib.dump(clf, clf_path)
-
-    print(f"  dl_regressor.pkl  — {reg_label} ({arch_name}, t_obs={t_obs}, "
-          f"n_features={data['n_features']})")
-    print(f"  dl_classifier.pkl — DLClassifier ({arch_name}, t_obs={t_obs}, "
-          f"n_features={data['n_features']})")
+    print(f"  Saved: {wrapper_label}")
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────

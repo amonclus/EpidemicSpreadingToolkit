@@ -49,12 +49,13 @@ except ImportError:
 
 def _find_ml_data() -> Path:
     for candidate in [
+        _SRC_DIR / "ml" / "ml_data",
         _SRC_DIR / "ml_data",
         _SRC_DIR.parent / "ml_data",
     ]:
         if candidate.exists() and (candidate / "dl_regressor.pkl").exists():
             return candidate
-    return _SRC_DIR / "ml_data"   # fallback — triggers demo mode
+    return _SRC_DIR / "ml" / "ml_data"   # fallback — triggers demo mode
 
 
 ML_DATA = _find_ml_data()
@@ -202,6 +203,11 @@ NETWORK_MULTIPLIER: dict[str, float] = {
     "Mixed social network (typical social media)":          1.00,
     "Influencer-driven network (few hubs, many followers)": 1.38,
 }
+
+# SIS-type models reach a long-run endemic equilibrium rather than dying out.
+# rho_final for these models = endemic steady-state fraction (NOT cumulative reach).
+# The peak of the trajectory is the more meaningful "maximum spread" metric.
+_ENDEMIC_MODELS = {"SIS", "WTM", "H4", "H5", "H6", "SIS-WTM hybrid"}
 
 TIPPING_THRESHOLDS: dict[str, float] = {
     "SIR": 0.05, "SIS": 0.05, "BP": 0.15, "WTM": 0.12,
@@ -729,7 +735,14 @@ def render_ml_virality_tab() -> None:
     conf        = res["confidence"]
     lo_pct      = max(0.0,   rho_pct - 1.5 * rho_std_pct)
     hi_pct      = min(100.0, rho_pct + 1.5 * rho_std_pct)
-    v_label, v_css, v_desc = _get_verdict(rho)
+
+    is_endemic  = model_name in _ENDEMIC_MODELS
+    traj_arr    = np.array(res["traj_pct"])
+    peak_pct    = float(traj_arr.max())
+    peak_rho    = peak_pct / 100.0
+
+    # For endemic models the verdict is driven by peak reach, not endemic level
+    v_label, v_css, v_desc = _get_verdict(peak_rho if is_endemic else rho)
 
     st.markdown("---")
 
@@ -745,18 +758,33 @@ def render_ml_virality_tab() -> None:
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.metric("Predicted final reach", f"{rho_pct:.1f}%")
-        st.progress(float(np.clip(rho, 0, 1)))
-        st.markdown(
-            f'<div class="ml-ci-card">'
-            f'<p style="margin:0 0 6px 0;font-size:0.8rem;text-transform:uppercase;'
-            f'letter-spacing:0.08em;opacity:0.7">90% confidence interval</p>'
-            f'<h3 style="margin:0">{lo_pct:.1f}% &ndash; {hi_pct:.1f}%</h3>'
-            f'<p style="margin:6px 0 0 0;font-size:0.85rem;opacity:0.7">'
-            f'±{rho_std_pct:.1f} pp standard deviation</p>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+
+        if is_endemic:
+            st.metric("Peak reach (maximum simultaneously infected)", f"{peak_pct:.1f}%")
+            st.progress(float(np.clip(peak_rho, 0, 1)))
+            st.markdown(
+                f'<div class="ml-ci-card">'
+                f'<p style="margin:0 0 6px 0;font-size:0.8rem;text-transform:uppercase;'
+                f'letter-spacing:0.08em;opacity:0.7">Endemic equilibrium level</p>'
+                f'<h3 style="margin:0">{rho_pct:.1f}%</h3>'
+                f'<p style="margin:6px 0 0 0;font-size:0.85rem;opacity:0.7">'
+                f'Long-run fraction remaining infected after the peak</p>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.metric("Predicted final reach (cumulative ever-infected)", f"{rho_pct:.1f}%")
+            st.progress(float(np.clip(rho, 0, 1)))
+            st.markdown(
+                f'<div class="ml-ci-card">'
+                f'<p style="margin:0 0 6px 0;font-size:0.8rem;text-transform:uppercase;'
+                f'letter-spacing:0.08em;opacity:0.7">90% confidence interval</p>'
+                f'<h3 style="margin:0">{lo_pct:.1f}% &ndash; {hi_pct:.1f}%</h3>'
+                f'<p style="margin:6px 0 0 0;font-size:0.85rem;opacity:0.7">'
+                f'±{rho_std_pct:.1f} pp standard deviation</p>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     with col_m:
         st.markdown(
@@ -856,26 +884,42 @@ def render_ml_virality_tab() -> None:
         extra_users = max(1, int(gap * 10_000))
         avg_step    = max(float(np.mean(np.diff(obs_arr))) / 100.0, 1e-5)
         hours_est   = max(1, int(gap / avg_step))
+        plateau_line = (
+            f"- Current trajectory suggests a peak of **{peak_pct:.1f}%** "
+            f"simultaneously infected, with a long-run endemic level of **{rho_pct:.1f}%**"
+            if is_endemic else
+            f"- Current trajectory suggests it will plateau at **{rho_pct:.1f}%** "
+            f"cumulative reach (ever-infected)"
+        )
         st.warning(
             f"⚠️ **This content has NOT yet crossed the viral tipping point.**\n\n"
             f"To push it over the threshold:\n\n"
             f"- Getting **{extra_users:,} more high-connectivity nodes** to share "
             f"in the next **{hours_est} steps** could trigger a cascade\n"
-            f"- Current trajectory suggests it will plateau at **{rho_pct:.1f}%** "
-            f"of the network"
+            f"{plateau_line}"
         )
 
     st.markdown("---")
     with st.expander("📋 Export Results"):
         graph_line = ("Graph-conditioned: Yes" if res.get("graph_conditioned")
                       else f"Network type        : {network_type or 'n/a'}")
+        if is_endemic:
+            reach_lines = (
+                f"Peak reach          : {peak_pct:.1f}%  (max simultaneously infected)\n"
+                f"Endemic equilibrium : {rho_pct:.1f}%  (long-run steady-state fraction)\n"
+            )
+        else:
+            reach_lines = (
+                f"Predicted reach     : {rho_pct:.1f}%  (range: {lo_pct:.1f}%–{hi_pct:.1f}%)\n"
+                f"                      (cumulative ever-infected)\n"
+            )
         summary_txt = (
             f"Virality Prediction Report\n"
             f"{'=' * 40}\n"
             f"Content type        : {content_type}\n"
             f"{graph_line}\n"
             f"Verdict             : {v_label}\n"
-            f"Predicted reach     : {rho_pct:.1f}%  (range: {lo_pct:.1f}%–{hi_pct:.1f}%)\n"
+            f"{reach_lines}"
             f"Spreading mechanism : {minfo['label']} ({model_name})\n"
             f"Confidence          : {conf * 100:.0f}%\n"
             f"Tipping point       : {'Crossed ✅' if crossed else 'Not yet ⚠️'}\n"
