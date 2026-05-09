@@ -34,5 +34,5 @@ python -m pip install --upgrade pip --quiet
 echo "Installing dependencies (might take a moment)..."
 python -m pip install -r src/requirements.txt --quiet
 
-# Launch the Streamlit app
-exec python -m streamlit run src/app.py
+# Launch the Dash app
+exec python src/app.py

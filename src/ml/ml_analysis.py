@@ -714,7 +714,7 @@ def run_classification(df: pd.DataFrame, I_all: np.ndarray,
     bars = ax.bar(net_labels, net_accs,
                   color=[net_colors[n] for n in net_labels], width=0.5)
     ax.axhline(overall_acc, color="gray", linestyle="--", lw=1.5,
-               label=f"t_obs=15 accuracy ({overall_acc:.3f})")
+               label=f"t_obs={T_OBS_DEFAULT} accuracy ({overall_acc:.3f})")
     for bar, val in zip(bars, net_accs):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.008,
                 f"{val:.3f}", ha="center", fontsize=FS_TICK)

@@ -345,6 +345,186 @@ def _build_feature_row(features: dict, feature_names: list) -> np.ndarray:
     return row.reshape(1, -1)
 
 
+# ── Real epidemic simulation for the Simulate input method ───────────────────
+
+_ENDEMIC_SIM = {"sis", "h4", "h5", "h6"}
+
+
+def _run_epidemic_series(
+    graph, model_key: str, params: dict,
+    n_seeds: int = 1, max_steps: int = 20, critical_frac: float = 0.30,
+    min_steps: int = 10, seed: int | None = None,
+) -> tuple[list[float], float]:
+    """
+    Returns (truncated_series, rho_final).
+
+    truncated_series — I(t)/N for the first max_steps steps, or until
+        infected fraction >= critical_frac or the epidemic dies.
+    rho_final — true final epidemic size running to natural termination
+        (capped at 300 steps): peak I/N for endemic models, ever-infected/N
+        for epidemic/threshold models.
+    """
+    import random as _rnd
+    rng = _rnd.Random(seed)
+
+    n = graph.number_of_nodes()
+    if n == 0:
+        return [], 0.0
+    nodes = list(graph.nodes())
+    infected = set(rng.sample(nodes, min(n_seeds, n)))
+    susceptible = set(nodes) - infected
+    ever_infected = set(infected)
+    peak_infected = len(infected)
+
+    I_series: list[float] = [len(infected) / n]
+    recording = True  # still building the truncated series
+
+    for _ in range(300):
+        newly_inf: set = set()
+        newly_rec: set = set()
+
+        if model_key == "sir":
+            beta, gamma = params["beta"], params["gamma"]
+            for node in infected:
+                for nb in graph.neighbors(node):
+                    if nb in susceptible and rng.random() < beta:
+                        newly_inf.add(nb)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible -= newly_inf
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "sis":
+            beta, gamma = params["beta"], params["gamma"]
+            for node in infected:
+                for nb in graph.neighbors(node):
+                    if nb in susceptible and rng.random() < beta:
+                        newly_inf.add(nb)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible = (susceptible - newly_inf) | newly_rec
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "bootstrap":
+            k = params["threshold"]
+            for node in susceptible:
+                if sum(1 for nb in graph.neighbors(node) if nb in infected) >= k:
+                    newly_inf.add(node)
+            if not newly_inf:
+                break
+            infected |= newly_inf
+            susceptible -= newly_inf
+
+        elif model_key == "wtm":
+            phi = params["phi"]
+            for node in susceptible:
+                deg = graph.degree(node)
+                if deg > 0:
+                    frac = sum(1 for nb in graph.neighbors(node) if nb in infected) / deg
+                    if frac >= phi:
+                        newly_inf.add(node)
+            if not newly_inf:
+                break
+            infected |= newly_inf
+            susceptible -= newly_inf
+
+        elif model_key == "h1":  # SIR OR Bootstrap threshold
+            beta, gamma, k = params["beta"], params["gamma"], params["threshold"]
+            candidates = {nb for node in infected for nb in graph.neighbors(node) if nb in susceptible}
+            for nb in candidates:
+                inf_count = sum(1 for n2 in graph.neighbors(nb) if n2 in infected)
+                if inf_count >= k or rng.random() < beta:
+                    newly_inf.add(nb)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible -= newly_inf
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "h2":  # SIR until switch_fraction, then Bootstrap
+            beta, gamma, k = params["beta"], params["gamma"], params["threshold"]
+            sf = params.get("switch_fraction", 0.2)
+            if len(ever_infected) / n < sf:
+                for node in infected:
+                    for nb in graph.neighbors(node):
+                        if nb in susceptible and rng.random() < beta:
+                            newly_inf.add(nb)
+            else:
+                for node in susceptible:
+                    if sum(1 for nb in graph.neighbors(node) if nb in infected) >= k:
+                        newly_inf.add(node)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible -= newly_inf
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "h3":  # Prob scales linearly with infected-neighbour count
+            beta, gamma = params["beta"], params["gamma"]
+            for node in susceptible:
+                m = sum(1 for nb in graph.neighbors(node) if nb in infected)
+                if m > 0 and rng.random() < min(1.0, m * beta):
+                    newly_inf.add(node)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible -= newly_inf
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "h4":  # SIS OR WTM threshold
+            beta, gamma, phi = params["beta"], params["gamma"], params["phi"]
+            for node in susceptible:
+                deg = graph.degree(node)
+                frac = sum(1 for nb in graph.neighbors(node) if nb in infected) / max(deg, 1)
+                if frac >= phi or rng.random() < beta:
+                    newly_inf.add(node)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible = (susceptible - newly_inf) | newly_rec
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "h5":  # SIS until switch_fraction, then WTM
+            beta, gamma, phi = params["beta"], params["gamma"], params["phi"]
+            sf = params.get("switch_fraction", 0.2)
+            if len(ever_infected) / n < sf:
+                for node in infected:
+                    for nb in graph.neighbors(node):
+                        if nb in susceptible and rng.random() < beta:
+                            newly_inf.add(nb)
+            else:
+                for node in susceptible:
+                    deg = graph.degree(node)
+                    frac = sum(1 for nb in graph.neighbors(node) if nb in infected) / max(deg, 1)
+                    if frac >= phi:
+                        newly_inf.add(node)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible = (susceptible - newly_inf) | newly_rec
+            infected = (infected | newly_inf) - newly_rec
+
+        elif model_key == "h6":  # Prob scales with infected-neighbour fraction / phi
+            gamma, phi = params["gamma"], params["phi"]
+            for node in susceptible:
+                deg = graph.degree(node)
+                if deg > 0:
+                    m = sum(1 for nb in graph.neighbors(node) if nb in infected)
+                    p = min(1.0, (m / deg) / phi)
+                    if rng.random() < p:
+                        newly_inf.add(node)
+            newly_rec = {node for node in infected if rng.random() < gamma}
+            susceptible = (susceptible - newly_inf) | newly_rec
+            infected = (infected | newly_inf) - newly_rec
+
+        ever_infected |= newly_inf
+        cur = len(infected)
+        if cur > peak_infected:
+            peak_infected = cur
+        frac = cur / n
+
+        if recording:
+            I_series.append(frac)
+            enough = len(I_series) >= min_steps
+            if len(I_series) >= max_steps or (enough and frac >= critical_frac) or cur == 0:
+                recording = False
+
+        if cur == 0:
+            break  # epidemic died naturally
+
+    rho_final = (peak_infected / n if model_key in _ENDEMIC_SIM
+                 else len(ever_infected) / n)
+    return I_series, rho_final
+
+
 # ── Trajectory generation ─────────────────────────────────────────────────────
 
 def _sigmoid(t_norm: np.ndarray, k: float, t0: float, scale: float) -> np.ndarray:
@@ -636,21 +816,82 @@ def render_ml_virality_tab() -> None:
                 ),
             ))
 
-        else:
-            init_reach   = st.slider("Initial reach (%)", 0.1, 5.0, 0.5, step=0.1)
-            growth_style = st.select_slider(
-                "Growth style",
-                options=["Slow and steady", "Moderate", "Explosive"],
-                value="Moderate",
-            )
-            add_noise = st.checkbox("Add realistic noise")
-            rates = {"Slow and steady": 0.08, "Moderate": 0.18, "Explosive": 0.38}
-            t_sim = np.arange(10)
-            base  = init_reach * np.exp(rates[growth_style] * t_sim)
-            if add_noise:
-                base = base * np.random.default_rng(42).uniform(0.85, 1.15, len(base))
-            series_pct = list(np.clip(base, 0.0, 100.0).round(2))
-            st.caption(f"Generated: {', '.join(str(v) for v in series_pct)}")
+        else:  # Simulate
+            _sim_graph = st.session_state.get("graph")
+            if _sim_graph is None:
+                st.warning("No graph loaded — load one above to run a real simulation.")
+                series_pct = [0.5, 0.8, 1.2, 2.1, 3.8]
+            else:
+                _SIM_LABELS = {
+                    "SIR": "sir", "SIS": "sis",
+                    "Bootstrap Percolation": "bootstrap", "Watts Threshold (WTM)": "wtm",
+                    "H1 — SIR ∨ Bootstrap": "h1", "H2 — SIR → Bootstrap": "h2",
+                    "H3 — Soft Bootstrap": "h3", "H4 — SIS ∨ WTM": "h4",
+                    "H5 — SIS → WTM": "h5", "H6 — Soft WTM": "h6",
+                }
+                sim_label = st.selectbox("Model to simulate", list(_SIM_LABELS.keys()), key="ml_sim_model")
+                sim_key   = _SIM_LABELS[sim_label]
+
+                sim_params: dict = {}
+                if sim_key in ("sir", "h1", "h2", "h3"):
+                    c1, c2 = st.columns(2)
+                    sim_params["beta"]  = c1.slider("β", 0.05, 0.60, 0.30, 0.05, key="ml_sim_beta")
+                    sim_params["gamma"] = c2.slider("γ", 0.05, 0.50, 0.10, 0.05, key="ml_sim_gamma")
+                    if sim_key in ("h1", "h2"):
+                        sim_params["threshold"] = st.slider("k (min. infected neighbours)", 1, 8, 3, key="ml_sim_k")
+                    if sim_key == "h2":
+                        sim_params["switch_fraction"] = st.slider("Switch at fraction f", 0.05, 0.50, 0.20, 0.05, key="ml_sim_sf")
+                elif sim_key in ("sis", "h4", "h5"):
+                    c1, c2 = st.columns(2)
+                    sim_params["beta"]  = c1.slider("β", 0.05, 0.60, 0.30, 0.05, key="ml_sim_beta")
+                    sim_params["gamma"] = c2.slider("γ", 0.05, 0.50, 0.20, 0.05, key="ml_sim_gamma")
+                    if sim_key in ("h4", "h5"):
+                        sim_params["phi"] = st.slider("φ (fraction threshold)", 0.10, 0.60, 0.25, 0.05, key="ml_sim_phi")
+                    if sim_key == "h5":
+                        sim_params["switch_fraction"] = st.slider("Switch at fraction f", 0.05, 0.50, 0.20, 0.05, key="ml_sim_sf")
+                elif sim_key == "h6":
+                    c1, c2 = st.columns(2)
+                    sim_params["gamma"] = c1.slider("γ", 0.05, 0.50, 0.10, 0.05, key="ml_sim_gamma")
+                    sim_params["phi"]   = c2.slider("φ", 0.10, 0.60, 0.25, 0.05, key="ml_sim_phi")
+                elif sim_key == "bootstrap":
+                    sim_params["threshold"] = st.slider("k (min. infected neighbours)", 1, 8, 3, key="ml_sim_k")
+                elif sim_key == "wtm":
+                    sim_params["phi"] = st.slider("φ (fraction threshold)", 0.10, 0.60, 0.25, 0.05, key="ml_sim_phi")
+
+                _n_graph = _sim_graph.number_of_nodes()
+                seed_frac_pct = st.slider(
+                    "Seed fraction (% of nodes)", 0.1, 10.0, 1.0, 0.1,
+                    key="ml_sim_seed_frac",
+                )
+                n_seeds = max(1, round(seed_frac_pct / 100 * _n_graph))
+                st.caption(f"≈ {n_seeds} seed node{'s' if n_seeds != 1 else ''} on this graph")
+
+                if st.button("▶ Run Simulation", use_container_width=True, key="ml_sim_run"):
+                    with st.spinner("Simulating…"):
+                        _series, _rho = _run_epidemic_series(
+                            _sim_graph, sim_key, sim_params,
+                            n_seeds=n_seeds, max_steps=20, critical_frac=0.30,
+                        )
+                    st.session_state["ml_sim_series"]    = _series
+                    st.session_state["ml_sim_rho_final"] = _rho
+                    st.session_state["ml_sim_label"]     = sim_label
+
+                if "ml_sim_series" in st.session_state and st.session_state["ml_sim_series"]:
+                    _s = st.session_state["ml_sim_series"]
+                    series_pct = [v * 100 for v in _s]
+                    _preview = ", ".join(f"{v:.1f}" for v in series_pct[:6])
+                    _suffix   = "…" if len(series_pct) > 6 else ""
+                    st.caption(
+                        f"{len(series_pct)} steps from **{st.session_state.get('ml_sim_label', sim_label)}** "
+                        f"— {_preview}{_suffix}"
+                    )
+                    _rho_disp = st.session_state.get("ml_sim_rho_final")
+                    if _rho_disp is not None:
+                        st.info(f"True final reach (simulation): **{_rho_disp * 100:.1f}%**")
+                else:
+                    series_pct = [0.5, 0.8, 1.2, 2.1, 3.8]
+                    if "ml_sim_run" not in st.session_state:
+                        st.caption("Click **▶ Run Simulation** to generate the trajectory.")
 
         horizon = st.slider("Prediction horizon (steps)", 10, 100, 50, step=5)
 

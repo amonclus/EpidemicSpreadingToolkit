@@ -8,3 +8,5 @@ statsmodels
 scipy
 tqdm
 torch
+dash
+dash-bootstrap-components
