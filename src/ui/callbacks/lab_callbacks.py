@@ -671,12 +671,52 @@ def register(app) -> None:
         except Exception as exc:
             return dbc.Alert(f"Animation error: {exc}", color="danger")
 
-    # ── Vulnerability tab ─────────────────────────────────────────────────────
+    # ── Vulnerability tab: show placeholder with Run button on tab switch ────────
     @app.callback(
         Output("tab-vuln-content",    "children"),
+        Input("lab-tabs",             "active_tab"),
+        State("store-vuln-results",   "data"),
+        State("store-block-results",  "data"),
+        State("store-graph",          "data"),
+        prevent_initial_call=True,
+    )
+    def show_vuln_tab(active_tab, cached_vuln, cached_block, graph_data):
+        if active_tab != "tab-vuln":
+            return no_update
+
+        graph = graph_from_store(graph_data)
+        if graph is None:
+            return _empty_state("No graph loaded.")
+
+        # If cached results exist, render them with a re-run button
+        if cached_vuln and cached_block:
+            bl_avg  = cached_block[-1].get("_baseline_avg",  0.0)
+            bl_prob = cached_block[-1].get("_baseline_prob", 0.0)
+            baseline = {"avg": bl_avg, "prob": bl_prob}
+            try:
+                cached_content = _build_vuln_content(graph, cached_vuln, cached_block, baseline)
+                return html.Div([
+                    dbc.Button("Re-run Analysis", id="btn-run-vuln", color="secondary",
+                               size="sm", className="mb-3"),
+                    html.Div(id="vuln-results-area", children=cached_content),
+                ])
+            except Exception:
+                pass
+
+        return html.Div([
+            html.P("Node vulnerability analysis runs per-node simulations and may take "
+                   "a moment for large graphs.", className="text-muted small mb-3"),
+            dbc.Button("Run Vulnerability Analysis", id="btn-run-vuln",
+                       color="primary", className="mb-3"),
+            html.Div(id="vuln-results-area"),
+        ])
+
+    # ── Vulnerability tab: run analysis on button click ───────────────────────
+    @app.callback(
+        Output("vuln-results-area",   "children"),
         Output("store-vuln-results",  "data"),
         Output("store-block-results", "data"),
-        Input("lab-tabs",             "active_tab"),
+        Input("btn-run-vuln",         "n_clicks"),
         State("store-graph",          "data"),
         State("store-model",          "data"),
         State("param-seed-fraction",  "value"),
@@ -687,38 +727,18 @@ def register(app) -> None:
         State("param-beta",           "value"),
         State("param-gamma",          "value"),
         State("param-switch-fraction","value"),
-        State("store-vuln-results",   "data"),
-        State("store-block-results",  "data"),
         prevent_initial_call=True,
     )
-    def render_vuln_tab(active_tab,
-                        graph_data, model,
-                        seed_fraction, num_trials, seed_strategy,
-                        threshold, phi, beta, gamma, switch_fraction,
-                        cached_vuln, cached_block):
-        if active_tab != "tab-vuln":
+    def run_vuln_analysis(n_clicks,
+                          graph_data, model,
+                          seed_fraction, num_trials, seed_strategy,
+                          threshold, phi, beta, gamma, switch_fraction):
+        if not n_clicks:
             return no_update, no_update, no_update
 
         graph = graph_from_store(graph_data)
         if graph is None:
             return _empty_state("No graph loaded."), no_update, no_update
-
-        # Return cached results if available
-        if cached_vuln and cached_block:
-            baseline = {"avg": cached_block[0].get("baseline_avg", 0.0),
-                        "prob": cached_block[0].get("baseline_prob", 0.0)}
-            # Extract baseline from first entry's stored fields
-            if cached_block and len(cached_block) > 0:
-                bl_avg  = cached_block[-1].get("_baseline_avg",  0.0)
-                bl_prob = cached_block[-1].get("_baseline_prob", 0.0)
-            else:
-                bl_avg, bl_prob = 0.0, 0.0
-            baseline = {"avg": bl_avg, "prob": bl_prob}
-            try:
-                content = _build_vuln_content(graph, cached_vuln, cached_block, baseline)
-                return content, no_update, no_update
-            except Exception:
-                pass  # fall through to re-compute
 
         config = _make_config(seed_fraction, num_trials, seed_strategy,
                               threshold, phi, beta, gamma, switch_fraction)
@@ -735,7 +755,6 @@ def register(app) -> None:
         except Exception as exc:
             return dbc.Alert(f"Vulnerability analysis error: {exc}", color="danger"), no_update, no_update
 
-        # Tag baseline into last element for caching
         block_data_stored = list(block_data)
         if block_data_stored:
             block_data_stored[-1]["_baseline_avg"]  = bl_avg

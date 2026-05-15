@@ -1,0 +1,16 @@
+Boarding School Influenza 1978 — Prediction Summary
+============================================================
+Population N=763, total infected=512
+True rho_final = 0.6710
+Observed series: 14 days, peak on day 6
+
+ days_observed  DL_rho DL_class  DL_err  ML_rho ML_class  ML_err  rho_true
+             1  0.0001       BP  0.6710  0.3425       BP  0.3285    0.6710
+             2  0.0007       H5  0.6703  0.1677       H2  0.5034    0.6710
+             3  0.0007       H5  0.6704  0.1548       H2  0.5162    0.6710
+             4  0.0029       H1  0.6682  0.3264       H2  0.3446    0.6710
+             5  0.3327       H1  0.3384  0.6115       H2  0.0595    0.6710
+             7  0.9371       H1  0.2661  0.8133       H1  0.1422    0.6710
+
+Best DL | k=7 days  rho=0.9371  class=H1  |err|=0.2661
+Best ML | k=5 days  rho=0.6115  class=H2  |err|=0.0595

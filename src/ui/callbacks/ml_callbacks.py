@@ -22,13 +22,16 @@ from ui.tabs.ml_tab import (
     TIPPING_THRESHOLDS,
     _ENDEMIC_MODELS,
     _DISPLAY_NAME,
+    _ENDEMIC_SIM,
     _extract_features,
     _generate_trajectory,
     _get_verdict,
     _load_models,
     _run_prediction,
+    _run_epidemic_series,
     _load_summary_metrics,
 )
+from ui.components.store import graph_from_store
 
 _PLOTLY = dict(
     paper_bgcolor="#F8FAFC",
@@ -39,16 +42,127 @@ _M = dict(l=50, r=20, t=30, b=50)
 
 def register(app) -> None:
 
-    # ── Toggle manual / upload div ────────────────────────────────────────────
+    # ── Toggle manual / upload / simulate divs ───────────────────────────────
     @app.callback(
         Output("ml-manual-div", "style"),
         Output("ml-upload-div", "style"),
+        Output("ml-sim-div",    "style"),
         Input("ml-input-method", "value"),
     )
     def toggle_input_method(method):
         show = {"display": "block"}
         hide = {"display": "none"}
-        return (show, hide) if method == "manual" else (hide, show)
+        return (
+            show if method == "manual"   else hide,
+            show if method == "upload"   else hide,
+            show if method == "simulate" else hide,
+        )
+
+    # ── Show/hide simulation param groups based on model ─────────────────────
+    @app.callback(
+        Output("ml-sim-beta-group",  "style"),
+        Output("ml-sim-gamma-group", "style"),
+        Output("ml-sim-k-group",     "style"),
+        Output("ml-sim-phi-group",   "style"),
+        Output("ml-sim-sf-group",    "style"),
+        Input("ml-sim-model", "value"),
+    )
+    def toggle_sim_params(model):
+        show = {"display": "block"}
+        hide = {"display": "none"}
+        beta_models  = {"sir", "sis", "h1", "h2", "h3", "h4", "h5"}
+        gamma_models = {"sir", "sis", "h1", "h2", "h3", "h4", "h5", "h6"}
+        k_models     = {"bootstrap", "h1", "h2"}
+        phi_models   = {"wtm", "h4", "h5", "h6"}
+        sf_models    = {"h2", "h5"}
+        return (
+            show if model in beta_models  else hide,
+            show if model in gamma_models else hide,
+            show if model in k_models     else hide,
+            show if model in phi_models   else hide,
+            show if model in sf_models    else hide,
+        )
+
+    # ── Update seed caption ───────────────────────────────────────────────────
+    @app.callback(
+        Output("ml-sim-seed-caption", "children"),
+        Input("ml-sim-seed-frac",     "value"),
+        State("store-graph",          "data"),
+    )
+    def update_seed_caption(seed_frac, graph_data):
+        graph = graph_from_store(graph_data)
+        if graph is None:
+            return "No graph loaded"
+        n = graph.number_of_nodes()
+        n_seeds = max(1, round((seed_frac or 1.0) / 100 * n))
+        return f"≈ {n_seeds} seed node{'s' if n_seeds != 1 else ''} on this graph ({n:,} nodes)"
+
+    # ── Run epidemic simulation and store resulting series ────────────────────
+    @app.callback(
+        Output("ml-series-store",  "data",     allow_duplicate=True),
+        Output("ml-sim-result",    "children"),
+        Input("ml-sim-run-btn",    "n_clicks"),
+        State("store-graph",       "data"),
+        State("ml-sim-model",      "value"),
+        State("ml-sim-beta",       "value"),
+        State("ml-sim-gamma",      "value"),
+        State("ml-sim-k",          "value"),
+        State("ml-sim-phi",        "value"),
+        State("ml-sim-sf",         "value"),
+        State("ml-sim-seed-frac",  "value"),
+        prevent_initial_call=True,
+    )
+    def run_ml_simulation(n_clicks, graph_data, model_key,
+                          beta, gamma, k, phi, sf, seed_frac):
+        if not n_clicks:
+            return no_update, no_update
+
+        graph = graph_from_store(graph_data)
+        if graph is None:
+            return no_update, dbc.Alert("No graph loaded — load one in the Lab first.",
+                                        color="warning")
+
+        params = {}
+        if model_key in {"sir", "sis", "h1", "h2", "h3", "h4", "h5"}:
+            params["beta"]  = float(beta  or 0.30)
+            params["gamma"] = float(gamma or 0.10)
+        if model_key == "h6":
+            params["gamma"] = float(gamma or 0.10)
+        if model_key in {"bootstrap", "h1", "h2"}:
+            params["threshold"] = int(k or 3)
+        if model_key in {"wtm", "h4", "h5", "h6"}:
+            params["phi"] = float(phi or 0.25)
+        if model_key in {"h2", "h5"}:
+            params["switch_fraction"] = float(sf or 0.20)
+
+        n = graph.number_of_nodes()
+        n_seeds = max(1, round((seed_frac or 1.0) / 100 * n))
+
+        try:
+            series, rho_final = _run_epidemic_series(
+                graph, model_key, params,
+                n_seeds=n_seeds, max_steps=20, critical_frac=0.30, min_steps=10,
+            )
+        except Exception as exc:
+            return no_update, dbc.Alert(f"Simulation error: {exc}", color="danger")
+
+        if not series:
+            return no_update, dbc.Alert("Epidemic died immediately — try different parameters.",
+                                        color="warning")
+
+        series_pct = [round(v * 100, 4) for v in series]
+        preview = ", ".join(f"{v:.1f}" for v in series_pct[:6])
+        suffix  = "…" if len(series_pct) > 6 else ""
+        result_info = html.Div([
+            html.P(f"{len(series_pct)} steps recorded — {preview}{suffix}",
+                   className="mb-1"),
+            dbc.Alert(
+                [html.Strong("True final reach: "),
+                 f"{rho_final * 100:.1f}%"],
+                color="info", className="py-1 px-2 mb-0",
+            ),
+        ])
+        return series_pct, result_info
 
     # ── Parse upload and cache series in store ────────────────────────────────
     @app.callback(
@@ -99,10 +213,11 @@ def register(app) -> None:
         State("ml-content-type",     "value"),
         State("ml-network-type",     "value"),
         State("ml-horizon",          "value"),
+        State("store-graph",         "data"),
         prevent_initial_call=True,
     )
     def run_prediction(n_clicks, input_method, manual_text, stored_series,
-                       content_type, network_type, horizon):
+                       content_type, network_type, horizon, graph_data):
         if not n_clicks:
             return _idle_state()
 
@@ -114,13 +229,16 @@ def register(app) -> None:
                 return dbc.Alert("Could not parse input values.", color="danger")
         else:
             series_pct = stored_series or [0.5, 0.8, 1.2, 2.1, 3.8]
+            if input_method == "simulate" and not stored_series:
+                return dbc.Alert("Run a simulation first before predicting.", color="warning")
 
         if len(series_pct) < 2:
             return dbc.Alert("Need at least 2 data points.", color="danger")
 
+        graph = graph_from_store(graph_data)
         try:
             res = _run_prediction(series_pct, content_type, network_type or "",
-                                  int(horizon or 50))
+                                  int(horizon or 50), graph=graph)
         except Exception as exc:
             return dbc.Alert(f"Prediction error: {exc}", color="danger")
 
