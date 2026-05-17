@@ -1,7 +1,7 @@
 # Network Contagion Lab
 
 An interactive platform for simulating, analysing, and predicting epidemic and cascade spreading processes on complex networks.  
-Developed as part of a Bachelor's thesis at **ISEP — Institut Supérieur d'Électronique de Paris**.
+Developed as part of a Bachelor's thesis at **ISEP.
 
 ---
 
