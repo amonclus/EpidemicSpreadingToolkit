@@ -173,6 +173,6 @@ Bootstrap/
 
 ## Credits
 
-Developed by **Álvaro Monclús**  
-Bachelor's Thesis — *Network Contagion Lab: Simulation, Analysis and Prediction of Epidemic Spreading on Complex Networks*  
-**ISEP — Institut Supérieur d'Électronique de Paris**
+Developed by **Álvaro Monclús** at **ISEP**, supervised by **Carlos Ferreira** and **Ana Moura**.
+Bachelor's Thesis: Epidemic spreading models on networks:Simulation, machine learning anaysis, and interactive prediction 
+
