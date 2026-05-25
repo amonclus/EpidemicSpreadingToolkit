@@ -1,11 +1,10 @@
 US ILINet — DL vs ML Prediction Summary
 =======================================================
-Seasons: 25  |  Observation windows: [10, 15, 20, 25, 30]
+Seasons: 25  |  Observation windows: [15, 20, 25, 30]
 Normalisation: ILI / 8.483% (global max)
 
 Mean predicted rho_final per window:
  k  DL_rho_mean  DL_rho_std  ML_rho_mean  ML_rho_std
-10       0.0011      0.0019       0.5366      0.1889
 15       0.0011      0.0019       0.8178      0.0738
 20       0.0061      0.0132       0.8322      0.0953
 25       0.0061      0.0132       0.8607      0.0747
@@ -14,7 +13,6 @@ Mean predicted rho_final per window:
 Mean |Δrho| between consecutive windows (stability):
     DL_delta  ML_delta
 k                     
-15    0.0000    0.2815
 20    0.0050    0.0495
 25    0.0000    0.0498
 30    0.6029    0.0234
