@@ -71,7 +71,7 @@ Open **http://localhost:8050** in your browser.
 A command-line interface is also available for headless execution:
 
 ```bash
-python src/Main.py
+python src/cli.py
 ```
 
 ---
