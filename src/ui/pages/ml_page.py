@@ -39,25 +39,18 @@ def layout() -> html.Div:
                 dbc.Col([
                     dbc.Card([
                         dbc.CardBody([
-                            html.H6("About your content", className="text-uppercase text-muted small fw-bold mb-3"),
-
-                            html.Label("Content type", className="form-label small fw-medium"),
-                            dbc.Select(
-                                id="ml-content-type",
-                                options=_CONTENT_OPTIONS,
-                                value="News or information",
-                                size="sm",
-                                className="mb-3",
-                            ),
-
-                            html.Label("Social network type", className="form-label small fw-medium"),
-                            dbc.Select(
-                                id="ml-network-type",
-                                options=_NETWORK_OPTIONS,
-                                value="Mixed social network (typical social media)",
-                                size="sm",
-                                className="mb-3",
-                            ),
+                            html.Div([
+                                dbc.Select(
+                                    id="ml-content-type",
+                                    options=_CONTENT_OPTIONS,
+                                    value="News or information",
+                                ),
+                                dbc.Select(
+                                    id="ml-network-type",
+                                    options=_NETWORK_OPTIONS,
+                                    value="Mixed social network (typical social media)",
+                                ),
+                            ], style={"display": "none"}),
 
                             html.Hr(className="my-2"),
 

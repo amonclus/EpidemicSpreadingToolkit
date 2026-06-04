@@ -242,9 +242,17 @@ _M = dict(l=50, r=20, t=30, b=50)
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner="Loading models…")
+_models_cache: list | None = None
+
 def _load_models():
     """Returns (reg, clf, label_encoder, feature_names, demo_mode, graph_feat_means)."""
+    global _models_cache
+    if _models_cache is not None:
+        return _models_cache
+    # The model classes live in src/ml/dl/; joblib needs that on sys.path to unpickle.
+    _ml_dir = str(_SRC_DIR / "ml")
+    if _ml_dir not in sys.path:
+        sys.path.insert(0, _ml_dir)
     try:
         import joblib
         reg = joblib.load(ML_DATA / "dl_regressor.pkl")
@@ -254,10 +262,11 @@ def _load_models():
             gfm = joblib.load(ML_DATA / "graph_feature_means.pkl")
         except Exception:
             gfm = {}
-        return reg, clf, le, None, False, gfm
+        _models_cache = reg, clf, le, None, False, gfm
     except Exception:
         le = {i: name for i, name in enumerate(MODEL_INFO)}
-        return None, None, le, None, True, {}
+        _models_cache = None, None, le, None, True, {}
+    return _models_cache
 
 
 # ── Feature extraction ────────────────────────────────────────────────────────
@@ -729,10 +738,7 @@ def render_ml_virality_tab() -> None:
         st.header("About your content")
         st.caption("Inputs for the predictor")
 
-        content_type = st.selectbox(
-            "What kind of content is this?",
-            options=list(CONTENT_TO_MODEL_HINTS.keys()),
-        )
+        content_type = None
 
         if session_graph is not None and _HAS_GRAPH_FEATURES:
             n  = session_graph.number_of_nodes()
@@ -743,10 +749,7 @@ def render_ml_virality_tab() -> None:
             )
             network_type = None
         else:
-            network_type = st.selectbox(
-                "What kind of social network?",
-                options=list(NETWORK_MULTIPLIER.keys()),
-            )
+            network_type = None
 
         if _HAS_GRAPH_GEN:
             with st.expander("🔄 Change graph"):
