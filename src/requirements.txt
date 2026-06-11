@@ -10,3 +10,4 @@ tqdm
 torch
 dash
 dash-bootstrap-components
+pytest

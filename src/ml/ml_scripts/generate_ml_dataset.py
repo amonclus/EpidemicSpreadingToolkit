@@ -58,7 +58,7 @@ N           = 1000   # nodes for ER and RGG
 LATTICE_SZ  = 32     # lattice is LATTICE_SZ × LATTICE_SZ (= 1024 nodes)
 
 OUTPUT_DIR      = Path("../ml_data")
-GRAPH_DATA_DIR  = Path("../../data")
+GRAPH_DATA_DIR  = Path("../../../data")
 GITHUB_SAMPLE   = 2000   # BFS-sampled node count for GitHub (full graph: 37 700 nodes)
 
 MODEL_IDS = {
