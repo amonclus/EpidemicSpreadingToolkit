@@ -6,6 +6,8 @@ watchdog
 pandas
 statsmodels
 scipy
+scikit-learn
+joblib
 tqdm
 torch
 dash
